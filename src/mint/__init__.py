@@ -11,13 +11,20 @@ full backward compatibility.
 import os as _os
 
 # Configure mint defaults before importing tinker
+# Normalize legacy env var without underscore.
+if "TINKER_APIKEY" in _os.environ and "TINKER_API_KEY" not in _os.environ:
+    _os.environ["TINKER_API_KEY"] = _os.environ["TINKER_APIKEY"]
+
 # MINT_API_KEY takes precedence, falls back to TINKER_API_KEY
-if "MINT_API_KEY" in _os.environ and "TINKER_API_KEY" not in _os.environ:
+if "MINT_API_KEY" in _os.environ:
     _os.environ["TINKER_API_KEY"] = _os.environ["MINT_API_KEY"]
 
-# MINT_BASE_URL takes precedence, falls back to TINKER_BASE_URL, then mint default
+# MINT_BASE_URL takes precedence. If MINT_API_KEY is set without a base URL,
+# default to mint even if TINKER_BASE_URL is present.
 if "MINT_BASE_URL" in _os.environ:
     _os.environ["TINKER_BASE_URL"] = _os.environ["MINT_BASE_URL"]
+elif "MINT_API_KEY" in _os.environ:
+    _os.environ["TINKER_BASE_URL"] = "https://mint.macaron.im"
 elif "TINKER_BASE_URL" not in _os.environ:
     _os.environ["TINKER_BASE_URL"] = "https://mint.macaron.im"
 

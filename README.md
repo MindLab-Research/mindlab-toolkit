@@ -15,8 +15,11 @@ pip install mindlab-toolkit
 ```python
 import mint
 
-# Set API key via environment variable MINT_API_KEY
-# Default base URL: https://mint-alpha.macaron.im
+# Set API key via environment variable MINT_API_KEY.
+# You can keep both MINT_* and TINKER_* variables in the same .env.
+# Importing mint makes MINT_* take precedence for this process; set MINT_BASE_URL
+# if you want a non-default endpoint.
+# Default base URL: https://mint.macaron.im
 
 client = mint.TrainingClient()
 ```
