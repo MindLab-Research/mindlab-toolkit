@@ -10,23 +10,28 @@ full backward compatibility.
 """
 import os as _os
 
+
+def _mint_sync_env() -> None:
+    # Normalize legacy env var without underscore.
+    if "TINKER_APIKEY" in _os.environ and "TINKER_API_KEY" not in _os.environ:
+        _os.environ["TINKER_API_KEY"] = _os.environ["TINKER_APIKEY"]
+
+    # MINT_API_KEY takes precedence, falls back to TINKER_API_KEY
+    if "MINT_API_KEY" in _os.environ:
+        _os.environ["TINKER_API_KEY"] = _os.environ["MINT_API_KEY"]
+
+    # MINT_BASE_URL takes precedence. If MINT_API_KEY is set without a base URL,
+    # default to mint even if TINKER_BASE_URL is present.
+    if "MINT_BASE_URL" in _os.environ:
+        _os.environ["TINKER_BASE_URL"] = _os.environ["MINT_BASE_URL"]
+    elif "MINT_API_KEY" in _os.environ:
+        _os.environ["TINKER_BASE_URL"] = "https://mint.macaron.im"
+    elif "TINKER_BASE_URL" not in _os.environ:
+        _os.environ["TINKER_BASE_URL"] = "https://mint.macaron.im"
+
+
 # Configure mint defaults before importing tinker
-# Normalize legacy env var without underscore.
-if "TINKER_APIKEY" in _os.environ and "TINKER_API_KEY" not in _os.environ:
-    _os.environ["TINKER_API_KEY"] = _os.environ["TINKER_APIKEY"]
-
-# MINT_API_KEY takes precedence, falls back to TINKER_API_KEY
-if "MINT_API_KEY" in _os.environ:
-    _os.environ["TINKER_API_KEY"] = _os.environ["MINT_API_KEY"]
-
-# MINT_BASE_URL takes precedence. If MINT_API_KEY is set without a base URL,
-# default to mint even if TINKER_BASE_URL is present.
-if "MINT_BASE_URL" in _os.environ:
-    _os.environ["TINKER_BASE_URL"] = _os.environ["MINT_BASE_URL"]
-elif "MINT_API_KEY" in _os.environ:
-    _os.environ["TINKER_BASE_URL"] = "https://mint.macaron.im"
-elif "TINKER_BASE_URL" not in _os.environ:
-    _os.environ["TINKER_BASE_URL"] = "https://mint.macaron.im"
+_mint_sync_env()
 
 _MINT_VERSION = "0.1.0"
 
@@ -42,6 +47,31 @@ def _mint_get_default_headers():
 
 
 _service_client_module._get_default_headers = _mint_get_default_headers
+
+_original_service_client_init = _service_client_module.ServiceClient.__init__
+
+
+def _mint_service_client_init(self, *args, **kwargs):
+    # Re-sync env at client construction time so load_dotenv() works even
+    # if called after importing mint.
+    _mint_sync_env()
+    return _original_service_client_init(self, *args, **kwargs)
+
+
+_service_client_module.ServiceClient.__init__ = _mint_service_client_init
+
+# Patch AsyncTinker for late env sync as well.
+import tinker._client as _client_module
+
+_original_async_tinker_init = _client_module.AsyncTinker.__init__
+
+
+def _mint_async_tinker_init(self, *args, **kwargs):
+    _mint_sync_env()
+    return _original_async_tinker_init(self, *args, **kwargs)
+
+
+_client_module.AsyncTinker.__init__ = _mint_async_tinker_init
 
 # Monkey-patch SDK to accept mint:// paths
 from tinker.lib.internal_client_holder import InternalClientHolder
