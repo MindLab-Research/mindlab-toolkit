@@ -29,6 +29,10 @@ def _mint_sync_env() -> None:
     elif "TINKER_BASE_URL" not in _os.environ:
         _os.environ["TINKER_BASE_URL"] = "https://mint.macaron.im"
 
+    # Disable telemetry by default to suppress "Telemetry queue full" warnings.
+    # Users can override by explicitly setting TINKER_TELEMETRY=1.
+    _os.environ.setdefault("TINKER_TELEMETRY", "0")
+
 
 # Configure mint defaults before importing tinker
 _mint_sync_env()
