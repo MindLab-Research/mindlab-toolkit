@@ -7,7 +7,8 @@ MinT is the reinforcement learning infrastructure for agents and models to learn
 ## Installation
 
 ```bash
-pip install mindlab-toolkit
+cd mindlab-toolkit
+pip install -e .
 ```
 
 ## Usage
