@@ -20,7 +20,8 @@ import mint
 # You can keep both MINT_* and TINKER_* variables in the same .env.
 # Importing mint makes MINT_* take precedence for this process; set MINT_BASE_URL
 # if you want a non-default endpoint.
-# Default base URL: https://mint.macaron.im
+# Default base URL: https://mint.macaron.xin
+# Mainland China endpoint override: https://mint-cn.macaron.xin/
 
 client = mint.TrainingClient()
 ```

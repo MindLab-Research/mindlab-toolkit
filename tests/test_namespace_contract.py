@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -8,6 +9,7 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 import mint  # noqa: E402
+from mint import mint as mint_impl  # noqa: E402
 
 
 def test_namespaces_exist_with_explicit_exports() -> None:
@@ -49,6 +51,16 @@ def test_version_guard_raises_on_mismatch() -> None:
     result = assert_tinker_version()
     assert result == EXPECTED_TINKER_VERSION
     assert result == tinker.__version__
+
+
+def test_sync_env_sets_default_base_url_when_unset(monkeypatch) -> None:
+    monkeypatch.delenv("MINT_BASE_URL", raising=False)
+    monkeypatch.delenv("TINKER_BASE_URL", raising=False)
+    monkeypatch.delenv("MINT_API_KEY", raising=False)
+
+    mint_impl.sync_env()
+
+    assert os.environ["TINKER_BASE_URL"] == "https://mint.macaron.xin"
 
 
 def test_no_wildcard_imports_in_namespace_files() -> None:

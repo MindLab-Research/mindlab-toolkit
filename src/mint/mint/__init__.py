@@ -8,7 +8,7 @@ import time as _time
 
 MINT_VERSION = "0.1.0"
 EXPECTED_TINKER_VERSION = "0.6.0"
-_MINT_DEFAULT_BASE_URL = "https://mint.macaron.im"
+_MINT_DEFAULT_BASE_URL = "https://mint.macaron.xin"
 _PATCH_STATE = {"applied": False}
 
 
