@@ -27,6 +27,10 @@ client = mint.TrainingClient()
 
 All tinker APIs are available directly from mint.
 
+## Documentation
+
+Read the MinT documentation at [mint-doc.macaron.im](https://mint-doc.macaron.im).
+
 ## License
 
 MIT
