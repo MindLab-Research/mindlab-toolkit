@@ -3,13 +3,39 @@
 from __future__ import annotations
 
 import asyncio as _asyncio
+import inspect as _inspect
 import os as _os
 import time as _time
 
 MINT_VERSION = "0.1.0"
-EXPECTED_TINKER_VERSION = "0.6.0"
+SUPPORTED_TINKER_SPEC = ">=0.15.0"
+EXPECTED_TINKER_VERSION = SUPPORTED_TINKER_SPEC
 _MINT_DEFAULT_BASE_URL = "https://mint.macaron.xin"
+_TINKER_API_KEY_ENV = "TINKER_API_KEY"
+_TINKER_API_KEY_PREFIX = "tml-"
+_TINKER_COMPAT_PLACEHOLDER_API_KEY = "tml-mint-compat-placeholder"
 _PATCH_STATE = {"applied": False}
+_REQUIRED_TINKER_EXPORTS = (
+    "TrainingClient",
+    "ServiceClient",
+    "SamplingClient",
+    "APIFuture",
+    "types",
+    "__version__",
+    "__title__",
+)
+_PATCH_POINTS = (
+    ("tinker.lib.public_interfaces.service_client", "_get_default_headers", ()),
+    ("tinker.lib.public_interfaces.service_client", "ServiceClient.__init__", ("self",)),
+    ("tinker._client", "AsyncTinker.__init__", ("self",)),
+    ("tinker.resources.futures", "AsyncFuturesResource.retrieve", ("self", "request")),
+    ("tinker.lib.telemetry", "Telemetry.log", ("self", "event_name", "event_data", "severity")),
+    (
+        "tinker.lib.internal_client_holder",
+        "InternalClientHolder._create_sampling_session",
+        ("self", "model_path", "base_model"),
+    ),
+)
 
 
 def sync_env() -> None:
@@ -32,18 +58,78 @@ def sync_env() -> None:
     _os.environ.setdefault("TINKER_TELEMETRY", "0")
 
 
-def assert_tinker_version() -> str:
-    """Raise RuntimeError if installed tinker != EXPECTED_TINKER_VERSION."""
+def _resolve_attr(target: object, dotted_name: str) -> object:
+    value = target
+    for part in dotted_name.split("."):
+        value = getattr(value, part)
+    return value
+
+
+def _signature_params(target: object) -> list[str]:
+    original_target = getattr(target, "_mint_original", target)
+    signature = _inspect.signature(original_target)
+    return list(signature.parameters)
+
+
+def _requested_tinker_api_key(kwargs: dict[str, object]) -> str | None:
+    api_key = kwargs.get("api_key")
+    if isinstance(api_key, str):
+        return api_key
+
+    env_api_key = _os.environ.get(_TINKER_API_KEY_ENV)
+    if isinstance(env_api_key, str) and env_api_key:
+        return env_api_key
+
+    return None
+
+
+def assert_tinker_compat() -> str:
+    """Raise RuntimeError if installed tinker lacks required MinT capabilities."""
     import tinker
 
     actual = str(getattr(tinker, "__version__", ""))
-    if actual != EXPECTED_TINKER_VERSION:
+    exports = getattr(tinker, "__all__", None)
+    if not isinstance(exports, (list, tuple)):
         raise RuntimeError(
-            f"mindlab-toolkit requires tinker=={EXPECTED_TINKER_VERSION}, "
-            f"but found tinker=={actual or 'unknown'}. "
-            f"Install with: pip install 'tinker=={EXPECTED_TINKER_VERSION}'"
+            "mindlab-toolkit requires tinker to expose a list-like __all__ surface "
+            f"compatible with {SUPPORTED_TINKER_SPEC}; found tinker=={actual or 'unknown'}"
         )
+
+    missing_exports = [
+        name for name in _REQUIRED_TINKER_EXPORTS if name not in exports or not hasattr(tinker, name)
+    ]
+    if missing_exports:
+        raise RuntimeError(
+            "mindlab-toolkit requires installed tinker to expose the MinT compatibility surface. "
+            f"Missing exports for tinker=={actual or 'unknown'}: {', '.join(missing_exports)}"
+        )
+
+    for module_name, dotted_name, required_params in _PATCH_POINTS:
+        module = __import__(module_name, fromlist=["__name__"])
+        try:
+            target = _resolve_attr(module, dotted_name)
+            actual_params = _signature_params(target)
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise RuntimeError(
+                "mindlab-toolkit requires installed tinker to keep the MinT patch points stable. "
+                f"Missing or unreadable patch point {module_name}:{dotted_name} "
+                f"for tinker=={actual or 'unknown'}"
+            ) from exc
+
+        missing_params = [name for name in required_params if name not in actual_params]
+        if missing_params:
+            raise RuntimeError(
+                "mindlab-toolkit requires installed tinker to keep MinT patch point parameters stable. "
+                f"Patch point {module_name}:{dotted_name} on tinker=={actual or 'unknown'} "
+                f"is missing parameters: {', '.join(missing_params)}"
+            )
+
     return actual
+
+
+def assert_tinker_version() -> str:
+    """Backward-compatible alias for capability-based validation."""
+    return assert_tinker_compat()
 
 
 def _env_ms(name: str, default_ms: int) -> float:
@@ -114,6 +200,8 @@ def _patch_service_client() -> None:
         sync_env()
         return original_service_client_init(self, *args, **kwargs)
 
+    _mint_get_default_headers._mint_original = original_get_headers
+    _mint_service_client_init._mint_original = original_service_client_init
     _service_client_module._get_default_headers = _mint_get_default_headers
     _service_client_module.ServiceClient.__init__ = _mint_service_client_init
     _service_client_module._mint_patch_applied = True
@@ -129,8 +217,30 @@ def _patch_async_tinker_init() -> None:
 
     def _mint_async_tinker_init(self, *args, **kwargs):
         sync_env()
-        return original_async_tinker_init(self, *args, **kwargs)
+        requested_api_key = _requested_tinker_api_key(kwargs)
+        if not requested_api_key or requested_api_key.startswith(_TINKER_API_KEY_PREFIX):
+            return original_async_tinker_init(self, *args, **kwargs)
 
+        original_env_api_key = _os.environ.get(_TINKER_API_KEY_ENV)
+        env_api_key_present = _TINKER_API_KEY_ENV in _os.environ
+        patched_kwargs = dict(kwargs)
+        if isinstance(patched_kwargs.get("api_key"), str):
+            patched_kwargs["api_key"] = _TINKER_COMPAT_PLACEHOLDER_API_KEY
+        else:
+            _os.environ[_TINKER_API_KEY_ENV] = _TINKER_COMPAT_PLACEHOLDER_API_KEY
+
+        try:
+            result = original_async_tinker_init(self, *args, **patched_kwargs)
+        finally:
+            if env_api_key_present:
+                _os.environ[_TINKER_API_KEY_ENV] = original_env_api_key or ""
+            else:
+                _os.environ.pop(_TINKER_API_KEY_ENV, None)
+
+        self.api_key = requested_api_key
+        return result
+
+    _mint_async_tinker_init._mint_original = original_async_tinker_init
     _client_module.AsyncTinker.__init__ = _mint_async_tinker_init
     _client_module._mint_patch_applied = True
 
@@ -143,8 +253,19 @@ def _patch_sampling_session_model_path() -> None:
     if getattr(InternalClientHolder, "_mint_patch_applied", False):
         return
 
-    async def _mint_create_sampling_session(self, model_path=None, base_model=None):
+    async def _mint_create_sampling_session(self, *args, model_path=None, base_model=None, **kwargs):
         """Patched version: no validation, pass path directly to server."""
+        if args:
+            if len(args) > 2:
+                raise TypeError("_create_sampling_session accepts at most model_path and base_model")
+            if len(args) >= 1:
+                model_path = args[0]
+            if len(args) >= 2:
+                base_model = args[1]
+        if kwargs:
+            unexpected = ", ".join(sorted(kwargs))
+            raise TypeError(f"_create_sampling_session received unexpected keyword arguments: {unexpected}")
+
         sampling_session_seq_id = self._sampling_client_counter
         self._sampling_client_counter += 1
         with self.aclient(ClientConnectionPoolType.SESSION) as client:
@@ -157,6 +278,7 @@ def _patch_sampling_session_model_path() -> None:
             result = await client.service.create_sampling_session(request=request)
             return result.sampling_session_id
 
+    _mint_create_sampling_session._mint_original = InternalClientHolder._create_sampling_session
     InternalClientHolder._create_sampling_session = _mint_create_sampling_session
     InternalClientHolder._mint_patch_applied = True
 
@@ -171,28 +293,9 @@ def _patch_retrieve_future_polling() -> None:
 
     original_retrieve = current_retrieve
 
-    async def _mint_async_futures_retrieve(
-        self,
-        *,
-        request,
-        extra_headers=None,
-        extra_query=None,
-        extra_body=None,
-        timeout=None,
-        idempotency_key=None,
-        max_retries=None,
-    ):
+    async def _mint_async_futures_retrieve(self, *args, **kwargs):
         try:
-            return await original_retrieve(
-                self,
-                request=request,
-                extra_headers=extra_headers,
-                extra_query=extra_query,
-                extra_body=extra_body,
-                timeout=timeout,
-                idempotency_key=idempotency_key,
-                max_retries=max_retries,
-            )
+            return await original_retrieve(self, *args, **kwargs)
         except tinker.APIStatusError as error:
             if error.status_code == 408:
                 delay_seconds = _retrieve_poll_delay_seconds(_extract_queue_state(error))
@@ -201,6 +304,7 @@ def _patch_retrieve_future_polling() -> None:
             raise
 
     _mint_async_futures_retrieve._mint_busy_poll_patch = True
+    _mint_async_futures_retrieve._mint_original = original_retrieve
     _futures_resource_module.AsyncFuturesResource.retrieve = _mint_async_futures_retrieve
 
 
@@ -230,13 +334,14 @@ def _patch_telemetry_408_sampling() -> None:
         return original_log(self, event_name, event_data=event_data, severity=severity)
 
     _mint_telemetry_log._mint_408_sampling_patch = True
+    _mint_telemetry_log._mint_original = original_log
     _telemetry_module.Telemetry.log = _mint_telemetry_log
 
 
 def apply_mint_patches() -> None:
     """Apply MinT compatibility patches once per interpreter."""
     sync_env()
-    assert_tinker_version()
+    assert_tinker_compat()
     if _PATCH_STATE["applied"]:
         return
 
@@ -250,8 +355,10 @@ def apply_mint_patches() -> None:
 
 __all__ = [
     "MINT_VERSION",
+    "SUPPORTED_TINKER_SPEC",
     "EXPECTED_TINKER_VERSION",
     "apply_mint_patches",
+    "assert_tinker_compat",
     "assert_tinker_version",
     "sync_env",
 ]
