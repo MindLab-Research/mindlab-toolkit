@@ -28,6 +28,23 @@ service_client = mint.ServiceClient()
 
 Top-level `import mint` is the Tinker-compatible surface. All public Tinker APIs are available directly from `mint` and mirrored in `mint.tinker`.
 
+## Lowest-Friction Tinker Migration
+
+If your existing code starts with `import tinker`, the smallest working MinT migration is:
+
+```python
+import mint as tinker
+```
+
+Then switch your credentials and endpoint to MinT.
+
+Why this matters:
+- raw upstream `import tinker` still validates API keys with the `tml-` prefix
+- MinT keys start with `sk-`
+- `import mint` applies the MinT compatibility patches that let the Tinker-style client surface keep working with MinT credentials
+
+If you must keep the exact `import tinker` statement, import `mint` earlier in the same process before constructing Tinker clients.
+
 ## MinT Extension Namespace (`mintx`)
 
 MinT-only APIs live under `mint.mint`. The intended usage is:
