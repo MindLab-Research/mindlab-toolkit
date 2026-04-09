@@ -23,10 +23,26 @@ import mint
 # Default base URL: https://mint.macaron.xin
 # Mainland China endpoint override: https://mint-cn.macaron.xin/
 
-client = mint.TrainingClient()
+service_client = mint.ServiceClient()
 ```
 
-All tinker APIs are available directly from mint.
+Top-level `import mint` is the Tinker-compatible surface. All public Tinker APIs are available directly from `mint` and mirrored in `mint.tinker`.
+
+## MinT Extension Namespace (`mintx`)
+
+MinT-only APIs live under `mint.mint`. The intended usage is:
+
+```python
+import mint
+import mint.mint as mintx
+
+service_client = mint.ServiceClient()
+openpi_client = mintx.create_openpi_training_client(service_client)
+```
+
+Use this namespace for MinT-specific extensions that should not appear in the default top-level `mint` surface. OpenPI / VLA helpers are the first concrete example of that rule.
+
+The current OpenPI helper is intentionally narrow: it is pinned to `openpi/pi0-fast-libero-low-mem-finetune` with LoRA rank `16`.
 
 ## Documentation
 

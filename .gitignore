@@ -1,3 +1,7 @@
+# Local agent tooling
+.claude/
+.issue-handoffs/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
@@ -36,3 +40,7 @@ htmlcov/
 # OS
 .DS_Store
 Thumbs.db
+
+# Codex task files
+PROMPT.md
+LOG.md

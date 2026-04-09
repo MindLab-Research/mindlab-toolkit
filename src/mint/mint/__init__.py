@@ -7,6 +7,28 @@ import inspect as _inspect
 import os as _os
 import time as _time
 
+from ._mintx import (
+    ForwardBackwardReverseKLRequest,
+    ForwardBackwardReverseKLResponse,
+    InterpolateCheckpointsRequest,
+    InterpolateCheckpointsResponse,
+    ReverseKLDatum,
+    ReverseKLItemOutput,
+    forward_backward_reverse_kl,
+    forward_backward_reverse_kl_async,
+    interpolate_checkpoints,
+    interpolate_checkpoints_async,
+)
+from .openpi import (
+    CAMERA_LAYOUT,
+    OPENPI_FAST_LORA_RANK,
+    OPENPI_FAST_MODEL,
+    OpenPITrainingClient,
+    build_openpi_fast_datum,
+    create_openpi_training_client,
+    create_openpi_training_client_async,
+)
+
 MINT_VERSION = "0.1.0"
 SUPPORTED_TINKER_SPEC = ">=0.15.0"
 EXPECTED_TINKER_VERSION = SUPPORTED_TINKER_SPEC
@@ -354,11 +376,28 @@ def apply_mint_patches() -> None:
 
 
 __all__ = [
+    "ForwardBackwardReverseKLRequest",
+    "ForwardBackwardReverseKLResponse",
+    "InterpolateCheckpointsRequest",
+    "InterpolateCheckpointsResponse",
     "MINT_VERSION",
+    "ReverseKLDatum",
+    "ReverseKLItemOutput",
     "SUPPORTED_TINKER_SPEC",
     "EXPECTED_TINKER_VERSION",
+    "CAMERA_LAYOUT",
+    "OPENPI_FAST_MODEL",
+    "OPENPI_FAST_LORA_RANK",
+    "OpenPITrainingClient",
+    "build_openpi_fast_datum",
+    "create_openpi_training_client",
+    "create_openpi_training_client_async",
     "apply_mint_patches",
     "assert_tinker_compat",
     "assert_tinker_version",
+    "forward_backward_reverse_kl",
+    "forward_backward_reverse_kl_async",
+    "interpolate_checkpoints",
+    "interpolate_checkpoints_async",
     "sync_env",
 ]
