@@ -30,12 +30,15 @@ from .openpi import (
 )
 
 MINT_VERSION = "0.1.0"
-SUPPORTED_TINKER_SPEC = ">=0.15.0"
-EXPECTED_TINKER_VERSION = SUPPORTED_TINKER_SPEC
+SUPPORTED_TINKER_VERSIONS = ("0.15.0",)
+EXPECTED_TINKER_VERSION = SUPPORTED_TINKER_VERSIONS[0]
+SUPPORTED_TINKER_SPEC = f"=={EXPECTED_TINKER_VERSION}"
 _MINT_DEFAULT_BASE_URL = "https://mint.macaron.xin"
 _TINKER_API_KEY_ENV = "TINKER_API_KEY"
 _TINKER_API_KEY_PREFIX = "tml-"
+_MINT_API_KEY_PREFIX = "sk-"
 _TINKER_COMPAT_PLACEHOLDER_API_KEY = "tml-mint-compat-placeholder"
+_ALLOW_UNSUPPORTED_TINKER_ENV = "MINT_ALLOW_UNSUPPORTED_TINKER"
 _PATCH_STATE = {"applied": False}
 _REQUIRED_TINKER_EXPORTS = (
     "TrainingClient",
@@ -105,11 +108,54 @@ def _requested_tinker_api_key(kwargs: dict[str, object]) -> str | None:
     return None
 
 
+def _is_mint_api_key(value: object) -> bool:
+    return isinstance(value, str) and value.startswith(_MINT_API_KEY_PREFIX)
+
+
+def _make_mint_api_key_auth_provider(api_key: str):
+    try:
+        from tinker.lib._auth_token_provider import AuthTokenProvider
+    except ModuleNotFoundError:
+        AuthTokenProvider = object
+
+    class _MintApiKeyAuthProvider(AuthTokenProvider):
+        def __init__(self, token: str) -> None:
+            self._token = token
+
+        async def get_token(self) -> str:
+            return self._token
+
+    return _MintApiKeyAuthProvider(api_key)
+
+
+def _unsupported_tinker_message(actual: str, tinker_file: str) -> str:
+    supported = ", ".join(SUPPORTED_TINKER_VERSIONS)
+    return (
+        "mindlab-toolkit requires a validated Tinker SDK version.\n"
+        f"Supported tinker versions: {supported}\n"
+        f"Installed tinker version: {actual or 'unknown'}\n"
+        f"Loaded from: {tinker_file or 'unknown'}\n\n"
+        "Fix this environment with:\n"
+        f"  python -m pip install --force-reinstall 'tinker=={EXPECTED_TINKER_VERSION}'\n\n"
+        "Then retry your MinT script."
+    )
+
+
+def _assert_supported_tinker_version(tinker_module: object) -> str:
+    actual = str(getattr(tinker_module, "__version__", ""))
+    if actual in SUPPORTED_TINKER_VERSIONS:
+        return actual
+    if _os.environ.get(_ALLOW_UNSUPPORTED_TINKER_ENV) in {"1", "true", "TRUE", "yes", "YES"}:
+        return actual
+    tinker_file = str(getattr(tinker_module, "__file__", ""))
+    raise RuntimeError(_unsupported_tinker_message(actual, tinker_file))
+
+
 def assert_tinker_compat() -> str:
-    """Raise RuntimeError if installed tinker lacks required MinT capabilities."""
+    """Raise RuntimeError if installed tinker is not a validated MinT dependency."""
     import tinker
 
-    actual = str(getattr(tinker, "__version__", ""))
+    actual = _assert_supported_tinker_version(tinker)
     exports = getattr(tinker, "__all__", None)
     if not isinstance(exports, (list, tuple)):
         raise RuntimeError(
@@ -203,6 +249,47 @@ def _retrieve_poll_delay_seconds(queue_state: str) -> float:
     return _env_ms("TINKER_RETRIEVE_POLL_UNKNOWN_MS", 1000)
 
 
+def _patch_api_key_auth_provider() -> None:
+    try:
+        import tinker.lib._auth_token_provider as _auth_token_provider_module
+    except ModuleNotFoundError:
+        # Tinker 0.15 keeps API-key validation in AsyncTinker.__init__ and
+        # request headers read self.api_key, so the AsyncTinker patch is enough.
+        return
+
+    import tinker.lib.internal_client_holder as _internal_client_holder_module
+
+    auth_provider_cls = _auth_token_provider_module.ApiKeyAuthProvider
+    if getattr(_auth_token_provider_module, "_mint_auth_patch_applied", False):
+        return
+
+    original_init = auth_provider_cls.__init__
+    original_resolve_auth_provider = _auth_token_provider_module.resolve_auth_provider
+
+    def _mint_api_key_auth_provider_init(self, api_key=None):
+        resolved = api_key or _os.environ.get(_TINKER_API_KEY_ENV)
+        if _is_mint_api_key(resolved):
+            # This is request-time auth state, not Tinker client construction.
+            # The constructor spoofing happens in the AsyncTinker patch below.
+            self._token = resolved
+            return None
+        return original_init(self, api_key=api_key)
+
+    def _mint_resolve_auth_provider(api_key, enforce_cmd):
+        resolved = api_key or _os.environ.get(_TINKER_API_KEY_ENV, "")
+        if _is_mint_api_key(resolved):
+            return _make_mint_api_key_auth_provider(resolved)
+        return original_resolve_auth_provider(api_key, enforce_cmd)
+
+    _mint_api_key_auth_provider_init._mint_original = original_init
+    _mint_resolve_auth_provider._mint_original = original_resolve_auth_provider
+    auth_provider_cls.__init__ = _mint_api_key_auth_provider_init
+    auth_provider_cls._mint_patch_applied = True
+    _auth_token_provider_module.resolve_auth_provider = _mint_resolve_auth_provider
+    _internal_client_holder_module.resolve_auth_provider = _mint_resolve_auth_provider
+    _auth_token_provider_module._mint_auth_patch_applied = True
+
+
 def _patch_service_client() -> None:
     import tinker.lib.public_interfaces.service_client as _service_client_module
 
@@ -240,8 +327,11 @@ def _patch_async_tinker_init() -> None:
     def _mint_async_tinker_init(self, *args, **kwargs):
         sync_env()
         requested_api_key = _requested_tinker_api_key(kwargs)
-        if not requested_api_key or requested_api_key.startswith(_TINKER_API_KEY_PREFIX):
-            return original_async_tinker_init(self, *args, **kwargs)
+        if not _is_mint_api_key(requested_api_key) or "_auth" in kwargs:
+            result = original_async_tinker_init(self, *args, **kwargs)
+            if requested_api_key:
+                self.api_key = requested_api_key
+            return result
 
         original_env_api_key = _os.environ.get(_TINKER_API_KEY_ENV)
         env_api_key_present = _TINKER_API_KEY_ENV in _os.environ
@@ -259,6 +349,7 @@ def _patch_async_tinker_init() -> None:
             else:
                 _os.environ.pop(_TINKER_API_KEY_ENV, None)
 
+        self._auth = _make_mint_api_key_auth_provider(requested_api_key)
         self.api_key = requested_api_key
         return result
 
@@ -367,6 +458,7 @@ def apply_mint_patches() -> None:
     if _PATCH_STATE["applied"]:
         return
 
+    _patch_api_key_auth_provider()
     _patch_service_client()
     _patch_async_tinker_init()
     _patch_sampling_session_model_path()
@@ -384,6 +476,7 @@ __all__ = [
     "ReverseKLDatum",
     "ReverseKLItemOutput",
     "SUPPORTED_TINKER_SPEC",
+    "SUPPORTED_TINKER_VERSIONS",
     "EXPECTED_TINKER_VERSION",
     "CAMERA_LAYOUT",
     "OPENPI_FAST_MODEL",

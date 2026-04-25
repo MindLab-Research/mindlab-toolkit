@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 SRC_ROOT = Path(__file__).resolve().parents[1] / "src"
 if str(SRC_ROOT) not in sys.path:
@@ -52,6 +53,7 @@ def test_capability_guard_accepts_current_install() -> None:
     from mint.mint import (
         EXPECTED_TINKER_VERSION,
         SUPPORTED_TINKER_SPEC,
+        SUPPORTED_TINKER_VERSIONS,
         assert_tinker_compat,
         assert_tinker_version,
     )
@@ -61,8 +63,27 @@ def test_capability_guard_accepts_current_install() -> None:
     result = assert_tinker_compat()
     assert result == tinker.__version__
     assert assert_tinker_version() == tinker.__version__
-    assert EXPECTED_TINKER_VERSION == SUPPORTED_TINKER_SPEC
-    assert "==" not in SUPPORTED_TINKER_SPEC
+    assert EXPECTED_TINKER_VERSION in SUPPORTED_TINKER_VERSIONS
+    assert SUPPORTED_TINKER_SPEC == f"=={EXPECTED_TINKER_VERSION}"
+
+
+def test_tinker_version_guard_rejects_unsupported_without_override(monkeypatch) -> None:
+    from mint.mint import _assert_supported_tinker_version
+
+    monkeypatch.delenv("MINT_ALLOW_UNSUPPORTED_TINKER", raising=False)
+    fake_tinker = SimpleNamespace(__version__="999.0.0", __file__="/tmp/fake-tinker.py")
+
+    try:
+        _assert_supported_tinker_version(fake_tinker)
+    except RuntimeError as exc:
+        message = str(exc)
+    else:
+        raise AssertionError("unsupported Tinker version was accepted without override")
+
+    assert "requires a validated Tinker SDK version" in message
+    assert "Installed tinker version: 999.0.0" in message
+    assert "python -m pip install --force-reinstall 'tinker==" in message
+    assert "/tmp/fake-tinker.py" in message
 
 
 def test_sync_env_sets_default_base_url_when_unset(monkeypatch) -> None:

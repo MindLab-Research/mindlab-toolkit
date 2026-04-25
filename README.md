@@ -11,6 +11,14 @@ cd mindlab-toolkit
 pip install -e .
 ```
 
+MinT pins the validated Tinker SDK dependency. If your environment already has a different Tinker version, reinstall with:
+
+```bash
+python -m pip install --force-reinstall 'tinker==0.15.0'
+```
+
+`import mint` also checks the installed Tinker version at runtime and fails fast with this command if the version is unsupported.
+
 ## Usage
 
 ```python

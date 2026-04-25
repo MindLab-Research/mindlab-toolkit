@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 from contextlib import contextmanager
 from pathlib import Path
@@ -59,6 +60,37 @@ def test_async_tinker_keeps_real_tml_api_key(monkeypatch: pytest.MonkeyPatch) ->
     try:
         assert client.api_key == "tml-live-test"
         assert client.auth_headers["X-API-Key"] == "tml-live-test"
+    finally:
+        asyncio.run(client.close())
+
+
+def test_async_tinker_uses_placeholder_for_local_mint_key_validation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("MINT_API_KEY", raising=False)
+    monkeypatch.delenv("TINKER_API_KEY", raising=False)
+    seen_api_keys: list[str | None] = []
+    current_init = client_module.AsyncTinker.__init__
+    original_init = current_init._mint_original
+
+    def strict_tinker_init(self, *args, **kwargs) -> None:
+        resolved = kwargs.get("api_key") or os.environ.get("TINKER_API_KEY")
+        seen_api_keys.append(resolved)
+        if isinstance(resolved, str) and resolved.startswith("sk-"):
+            raise AssertionError("MinT key reached Tinker local constructor")
+        original_init(self, *args, **kwargs)
+
+    monkeypatch.setattr(client_module.AsyncTinker, "__init__", strict_tinker_init)
+    monkeypatch.setattr(client_module, "_mint_patch_applied", False, raising=False)
+    mint.mint._patch_async_tinker_init()
+
+    client = client_module.AsyncTinker(
+        api_key="sk-explicit-test",
+        base_url="https://example.invalid",
+    )
+    try:
+        assert seen_api_keys == ["tml-mint-compat-placeholder"]
+        assert client.auth_headers["X-API-Key"] == "sk-explicit-test"
     finally:
         asyncio.run(client.close())
 
