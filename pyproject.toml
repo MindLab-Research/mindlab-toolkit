@@ -23,6 +23,7 @@ classifiers = [
 ]
 dependencies = [
     "tinker==0.15.0",
+    "tinker-cookbook>=0.1.0",
 ]
 
 [project.urls]
