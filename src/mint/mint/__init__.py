@@ -28,7 +28,6 @@ from .openpi import (
     create_openpi_training_client,
     create_openpi_training_client_async,
 )
-from . import renderers, completers  # noqa: F401 — explicit submodule loading
 
 MINT_VERSION = "0.1.0"
 SUPPORTED_TINKER_VERSIONS = ("0.15.0",)
@@ -494,6 +493,4 @@ __all__ = [
     "interpolate_checkpoints",
     "interpolate_checkpoints_async",
     "sync_env",
-    "renderers",
-    "completers",
 ]
