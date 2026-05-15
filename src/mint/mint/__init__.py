@@ -451,6 +451,78 @@ def _patch_telemetry_408_sampling() -> None:
     _telemetry_module.Telemetry.log = _mint_telemetry_log
 
 
+def _ensure_datum_weights(datum):
+    """Return datum with `weights` in loss_fn_inputs if no mask field exists."""
+    lfi = datum.loss_fn_inputs
+    if not isinstance(lfi, dict):
+        return datum
+    if "weights" in lfi or "loss_mask" in lfi or "mask" in lfi:
+        return datum
+
+    import tinker.types as _types
+
+    target = lfi.get("target_tokens")
+    advantages = lfi.get("advantages")
+
+    if advantages is not None:
+        raw = advantages.data if hasattr(advantages, "data") else advantages
+        # `advantages` controls the GRPO update direction and magnitude.
+        # `weights` only marks trainable agent tokens, so zero-advantage tokens
+        # should still participate with a neutral gradient contribution.
+        weights_list = [1.0] * len(raw)
+    elif target is not None:
+        raw = target.data if hasattr(target, "data") else target
+        weights_list = [1.0] * len(raw)
+    else:
+        return datum
+
+    weights_td = _types.TensorData(data=weights_list, dtype="float32")
+    new_lfi = {**lfi, "weights": weights_td}
+    return _types.Datum(model_input=datum.model_input, loss_fn_inputs=new_lfi)
+
+
+def _patch_forward_backward_datum_weights() -> None:
+    import tinker
+
+    tc_cls = tinker.TrainingClient
+    if getattr(tc_cls, "_mint_fb_weights_patch_applied", False):
+        return
+
+    original_fb = tc_cls.forward_backward
+    original_fba = tc_cls.forward_backward_async
+    original_fbc = tc_cls.forward_backward_custom
+    original_fbca = tc_cls.forward_backward_custom_async
+
+    def _ensure_data_weights(data):
+        return [_ensure_datum_weights(d) for d in data]
+
+    def _mint_forward_backward(self, data, loss_fn, loss_fn_config=None):
+        data = _ensure_data_weights(data)
+        return original_fb(self, data, loss_fn, loss_fn_config=loss_fn_config)
+
+    def _mint_forward_backward_async(self, data, loss_fn, loss_fn_config=None):
+        data = _ensure_data_weights(data)
+        return original_fba(self, data, loss_fn, loss_fn_config=loss_fn_config)
+
+    def _mint_forward_backward_custom(self, data, loss_fn):
+        data = _ensure_data_weights(data)
+        return original_fbc(self, data, loss_fn)
+
+    async def _mint_forward_backward_custom_async(self, data, loss_fn):
+        data = _ensure_data_weights(data)
+        return await original_fbca(self, data, loss_fn)
+
+    _mint_forward_backward._mint_original = original_fb
+    _mint_forward_backward_async._mint_original = original_fba
+    _mint_forward_backward_custom._mint_original = original_fbc
+    _mint_forward_backward_custom_async._mint_original = original_fbca
+    tc_cls.forward_backward = _mint_forward_backward
+    tc_cls.forward_backward_async = _mint_forward_backward_async
+    tc_cls.forward_backward_custom = _mint_forward_backward_custom
+    tc_cls.forward_backward_custom_async = _mint_forward_backward_custom_async
+    tc_cls._mint_fb_weights_patch_applied = True
+
+
 def apply_mint_patches() -> None:
     """Apply MinT compatibility patches once per interpreter."""
     sync_env()
@@ -464,6 +536,7 @@ def apply_mint_patches() -> None:
     _patch_sampling_session_model_path()
     _patch_retrieve_future_polling()
     _patch_telemetry_408_sampling()
+    _patch_forward_backward_datum_weights()
     _PATCH_STATE["applied"] = True
 
 

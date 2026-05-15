@@ -1,11 +1,10 @@
-"""mint.recipe — re-export of tinker_cookbook."""
+"""Public MinT recipe helpers and training modules."""
 try:
     import tinker_cookbook as _tc
 except ImportError as _exc:
     raise ImportError(
-        "mint.recipe requires the 'tinker-cookbook' package.\n"
-        "Install it with:  pip install mindlab-toolkit\n"
-        "Or directly:      pip install tinker-cookbook"
+        "mint.recipe requires the recipe package bundled with mindlab-toolkit.\n"
+        "Install it with:  pip install mindlab-toolkit"
     ) from _exc
 
 # Top-level subpackages
@@ -56,8 +55,16 @@ import tinker_cookbook.recipes.verifiers_rl  # noqa: F401
 import tinker_cookbook.recipes.vlm_classifier  # noqa: F401
 
 # Convenience shortcuts
-from tinker_cookbook.supervised.common import datum_from_model_input_weights  # noqa: F401
 from tinker_cookbook.model_info import get_recommended_renderer_name  # noqa: F401
+from tinker_cookbook.renderers.base import Message  # noqa: F401
+from tinker_cookbook.rl.message_env import (  # noqa: F401
+    EnvFromMessageEnv,
+    MessageEnv,
+    MessageStepResult,
+)
+from tinker_cookbook.supervised.common import datum_from_model_input_weights  # noqa: F401
+from tinker_cookbook.supervised.data import conversation_to_datum  # noqa: F401
+from tinker_cookbook.tokenizer_utils import get_tokenizer  # noqa: F401
 
 __all__ = [
     # Subpackages
@@ -80,4 +87,10 @@ __all__ = [
     # Convenience shortcuts
     "datum_from_model_input_weights",
     "get_recommended_renderer_name",
+    "Message",
+    "EnvFromMessageEnv",
+    "MessageEnv",
+    "MessageStepResult",
+    "conversation_to_datum",
+    "get_tokenizer",
 ]
