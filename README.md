@@ -1,8 +1,14 @@
+<p align="center">
+  <img src="docs/assets/mint-icon.png" alt="MinT" width="120" height="120">
+</p>
+
 # Mind Lab Toolkit (MinT)
 
 The Open Infrastructure for Experiential Intelligence.
 
 MinT is the reinforcement learning infrastructure for agents and models to learn from real experience. It focuses on the engineering and algorithmic realization of RL across multiple models and tasks, with emphasis on making LoRA RL simple, stable, and efficient.
+
+Visit the [MinT website](https://macaron.im/mindlab/mint).
 
 ## Installation
 
