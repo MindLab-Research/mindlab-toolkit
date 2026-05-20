@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/assets/mint-icon.png" alt="MinT" width="120" height="120">
+  <img src="docs/assets/mint-icon.jpg" alt="MinT" width="120" height="120">
 </p>
 
 # Mind Lab Toolkit (MinT)
