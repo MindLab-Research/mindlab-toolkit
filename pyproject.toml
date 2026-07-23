@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mindlab-toolkit"
-version = "0.0.1"
+version = "0.2.0"
 description = "Mind Lab Toolkit (MinT) - the Open Infrastructure for Experiential Intelligence"
 readme = "README.md"
 license = "MIT"
@@ -22,8 +22,7 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
 ]
 dependencies = [
-    "tinker==0.15.0",
-    "tinker-cookbook>=0.1.0",
+    "tinker==0.22.0",
 ]
 
 [project.urls]

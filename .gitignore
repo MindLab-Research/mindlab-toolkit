@@ -44,3 +44,10 @@ Thumbs.db
 # Codex task files
 PROMPT.md
 LOG.md
+
+# Local-only test suite (not tracked)
+tests/
+
+# Agent scaffolding (local-only)
+.codex/
+.pi/

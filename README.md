@@ -67,13 +67,15 @@ MinT-only APIs live under `mint.mint`. The intended usage is:
 import mint
 import mint.mint as mintx
 
-service_client = mint.ServiceClient()
-openpi_client = mintx.create_openpi_training_client(service_client)
+training_client = ...  # a mint/tinker TrainingClient
+mintx.forward_backward_reverse_kl(
+    training_client,
+    reference_model_path="mint://teacher-step-0010",
+    data=[...],
+)
 ```
 
-Use this namespace for MinT-specific extensions that should not appear in the default top-level `mint` surface. OpenPI / VLA helpers are the first concrete example of that rule.
-
-The current OpenPI helper is intentionally narrow: it is pinned to `openpi/pi0-fast-libero-low-mem-finetune` with LoRA rank `16`.
+Use this namespace for MinT-specific extensions that should not appear in the default top-level `mint` surface. The current extensions are the MinT-only endpoints `forward_backward_reverse_kl` and `interpolate_checkpoints`.
 
 ## Documentation
 

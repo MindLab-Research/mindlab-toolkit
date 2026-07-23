@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, field_validator
 
 import tinker
 from tinker._compat import model_dump
@@ -17,11 +17,38 @@ class MintXBaseModel(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
 
+class TensorData(MintXBaseModel):
+    """Wire mirror of the MinT server's TensorData ({data, shape, dtype}).
+
+    tinker.types.TensorData is a @dataclass using ``from __future__ import
+    annotations``; typing a pydantic field with it forces a dataclass-schema
+    rebuild that re-evaluates string annotations (LossFnInputs, Optional) in the
+    wrong namespace and raises PydanticUndefinedAnnotation. This local mirror
+    matches the MinT server schema exactly, so no rebuild of tinker internals
+    happens. A dataclass tinker.types.TensorData is coerced by reading its
+    .data/.shape/.dtype properties.
+    """
+
+    data: list[int] | list[float] | float
+    shape: list[int] | None = None
+    dtype: str = "float32"
+
+
+def _coerce_tensor(value: Any) -> Any:
+    if isinstance(value, tinker.types.TensorData):
+        return {"data": value.data, "shape": value.shape, "dtype": value.dtype}
+    return value
+
+
 class ReverseKLDatum(MintXBaseModel):
     student_input: tinker.types.ModelInput
     reference_input: tinker.types.ModelInput
-    target_tokens: tinker.types.TensorData
-    weights: tinker.types.TensorData
+    target_tokens: TensorData
+    weights: TensorData
+
+    _coerce = field_validator("target_tokens", "weights", mode="before")(
+        staticmethod(_coerce_tensor)
+    )
 
 
 class InterpolateCheckpointsRequest(MintXBaseModel):
@@ -51,7 +78,7 @@ class ForwardBackwardReverseKLRequest(MintXBaseModel):
 
 
 class ReverseKLItemOutput(MintXBaseModel):
-    loss: tinker.types.TensorData
+    loss: TensorData
 
 
 class ForwardBackwardReverseKLResponse(MintXBaseModel):
