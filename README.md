@@ -12,35 +12,58 @@ Visit the [MinT website](https://macaron.im/mindlab/mint).
 
 ## Installation
 
-```bash
-cd mindlab-toolkit
-pip install -e .
-```
-
-MinT pins the validated Tinker SDK dependency. If your environment already has a different Tinker version, reinstall with:
+From a source checkout:
 
 ```bash
-python -m pip install --force-reinstall 'tinker==0.15.0'
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install .
 ```
 
-`import mint` also checks the installed Tinker version at runtime and fails fast with this command if the version is unsupported.
+When `mindlab-toolkit==0.2.0` is available on your configured package index, the equivalent package installation is:
+
+```bash
+python -m pip install 'mindlab-toolkit==0.2.0'
+```
+
+MinT pins and installs its validated SDK dependency automatically:
+
+```text
+mindlab-toolkit==0.2.0
+tinker==0.22.0
+```
+
+Do not use `pip install --no-deps`. That option bypasses dependency installation. `import mint` checks the installed Tinker distribution before importing Tinker internals and reports how to install `tinker==0.22.0` when it is missing or incompatible.
+
+The Python package version (`0.2.0`) and this repository's release tags (for example `v2.6.5`) are currently separate version identifiers.
 
 ## Usage
+
+Global endpoint, which is also the default:
+
+```bash
+export MINT_API_KEY=sk-...
+export MINT_BASE_URL=https://mint.macaron.im/train
+```
+
+China endpoint:
+
+```bash
+export MINT_API_KEY=sk-...
+export MINT_BASE_URL=https://mintcn.macaron.xin/train
+```
+
+Then create clients through MinT's Tinker-compatible surface:
 
 ```python
 import mint
 
-# Set API key via environment variable MINT_API_KEY.
-# You can keep both MINT_* and TINKER_* variables in the same .env.
-# Importing mint makes MINT_* take precedence for this process; set MINT_BASE_URL
-# if you want a non-default endpoint.
-# Default base URL: https://mint.macaron.xin
-# Mainland China endpoint override: https://mint-cn.macaron.xin/
-
 service_client = mint.ServiceClient()
 ```
 
-Top-level `import mint` is the Tinker-compatible surface. All public Tinker APIs are available directly from `mint` and mirrored in `mint.tinker`.
+A non-empty `MINT_API_KEY` takes precedence over `TINKER_API_KEY` for the process. A non-empty `MINT_BASE_URL` similarly takes precedence over `TINKER_BASE_URL`; an explicit client constructor `base_url` remains the final override. Both supported deployment URLs retain their `/train` prefix.
+
+Top-level `import mint` exposes the public Tinker 0.22.0 API directly and mirrors it in `mint.tinker`.
 
 ## Lowest-Friction Tinker Migration
 
@@ -53,11 +76,13 @@ import mint as tinker
 Then switch your credentials and endpoint to MinT.
 
 Why this matters:
-- raw upstream `import tinker` still validates API keys with the `tml-` prefix
-- MinT keys start with `sk-`
-- `import mint` applies the MinT compatibility patches that let the Tinker-style client surface keep working with MinT credentials
 
-If you must keep the exact `import tinker` statement, import `mint` earlier in the same process before constructing Tinker clients.
+- raw upstream `import tinker` keeps Tinker's original behavior: `tml-` and `eyJ...` are accepted, while `sk-` is rejected
+- MinT keys start with `sk-`
+- `import mint` validates Tinker 0.22.0 and patches its confirmed standard client construction paths for MinT keys
+- Tinker's original `ApiKeyAuthProvider` class remains unchanged and still rejects `sk-` when called directly
+
+If you must keep the exact `import tinker` statement, import `mint` earlier in the same process before constructing Tinker clients. Importing only `tinker` does not load MinT compatibility.
 
 ## MinT Extension Namespace (`mintx`)
 

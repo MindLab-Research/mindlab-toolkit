@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os as _os
 
+from .._version_check import EXPECTED_TINKER_VERSION
 from ._auth import MintApiKeyAuthProvider, apply_auth_patch
 from ._mintx import (
     ForwardBackwardReverseKLRequest,
@@ -24,8 +25,9 @@ from ._mintx import (
     interpolate_checkpoints_async,
 )
 MINT_VERSION = "0.2.0"
-EXPECTED_TINKER_VERSION = "0.22.0"
-_MINT_DEFAULT_BASE_URL = "https://mint.macaron.xin"
+MINT_GLOBAL_BASE_URL = "https://mint.macaron.im/train"
+MINT_CHINA_BASE_URL = "https://mintcn.macaron.xin/train"
+_MINT_DEFAULT_BASE_URL = MINT_GLOBAL_BASE_URL
 _PATCH_STATE = {"applied": False}
 
 
@@ -37,11 +39,13 @@ def sync_env() -> None:
     precedence for this process. Explicit constructor arguments always win
     because tinker reads them before the environment.
     """
-    if "MINT_API_KEY" in _os.environ:
-        _os.environ["TINKER_API_KEY"] = _os.environ["MINT_API_KEY"]
+    mint_api_key = _os.environ.get("MINT_API_KEY", "")
+    if mint_api_key.strip():
+        _os.environ["TINKER_API_KEY"] = mint_api_key
 
-    if "MINT_BASE_URL" in _os.environ:
-        _os.environ["TINKER_BASE_URL"] = _os.environ["MINT_BASE_URL"]
+    mint_base_url = _os.environ.get("MINT_BASE_URL", "")
+    if mint_base_url.strip():
+        _os.environ["TINKER_BASE_URL"] = mint_base_url
     else:
         _os.environ.setdefault("TINKER_BASE_URL", _MINT_DEFAULT_BASE_URL)
 
@@ -57,6 +61,8 @@ def apply_mint_patches() -> None:
 
 __all__ = [
     "MINT_VERSION",
+    "MINT_GLOBAL_BASE_URL",
+    "MINT_CHINA_BASE_URL",
     "EXPECTED_TINKER_VERSION",
     "MintApiKeyAuthProvider",
     "apply_auth_patch",

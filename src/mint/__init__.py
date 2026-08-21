@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from ._version_check import EXPECTED_TINKER_VERSION, check_tinker_version
+
+check_tinker_version()
+
 from . import mint as mint
 from .mint import MINT_VERSION, apply_mint_patches
 
@@ -26,4 +30,5 @@ __all__ = [
     *_TOP_LEVEL_REEXPORTS,
     "__version__",
     "__tinker_version__",
+    "EXPECTED_TINKER_VERSION",
 ]
