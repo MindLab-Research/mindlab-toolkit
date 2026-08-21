@@ -2,55 +2,54 @@
 
 tinker's ``ApiKeyAuthProvider`` (tinker.lib._auth_token_provider) rejects any
 key that does not start with ``tml-`` or ``eyJ``. MinT issues ``sk-`` keys. The
-rejection fires inside ``InternalClientHolder.__init__`` via two code paths:
+rejection is reachable through three tinker 0.22.0 call sites:
 
-1. ``resolve_auth_provider(api_key, ...)`` at client-construction time, before any
-   custom ``_auth`` argument takes effect
-2. Direct instantiation of ``ApiKeyAuthProvider(api_key=...)`` when
-   ``pjwt_auth_enabled=False`` (line 245 in internal_client_holder.py)
+1. ``InternalClientHolder`` calls ``resolve_auth_provider(api_key, ...)``
+2. ``InternalClientHolder`` directly constructs ``ApiKeyAuthProvider`` when
+   ``pjwt_auth_enabled=False``
+3. ``AsyncTinker`` directly constructs ``ApiKeyAuthProvider`` when no custom
+   ``_auth`` provider is supplied
 
-``internal_client_holder`` imports ``resolve_auth_provider`` by value
-(``from ..._auth_token_provider import resolve_auth_provider``), so both module
-namespaces must be overwritten; patching the origin module alone is a no-op for
-the holder's call site.
+The holder and client modules import auth symbols by value, so their module
+bindings must be patched at each call site. The original ``ApiKeyAuthProvider``
+class remains unchanged for callers outside MinT.
 
-This module patches both code paths to ensure ``sk-`` keys work in all scenarios.
+This module patches all three paths without weakening tinker's global key
+validation.
 """
 
 from __future__ import annotations
 
 import os
 
-from tinker.lib._auth_token_provider import AuthTokenProvider
+from tinker.lib._auth_token_provider import ApiKeyAuthProvider
 
 MINT_API_KEY_PREFIX = "sk-"
 
 
-class MintApiKeyAuthProvider(AuthTokenProvider):
+class MintApiKeyAuthProvider(ApiKeyAuthProvider):
     """Auth provider for MinT ``sk-`` keys, without tinker's prefix check."""
 
     def __init__(self, token: str) -> None:
         self._token = token
 
-    async def get_token(self) -> str | None:
-        return self._token
-
 
 def apply_auth_patch() -> None:
-    """Patch ``resolve_auth_provider`` and ``ApiKeyAuthProvider`` so ``sk-`` keys authenticate.
+    """Patch tinker 0.22.0 auth call sites used by MinT clients.
 
-    Two patches are required:
-    1. resolve_auth_provider: for JWT-enabled authentication flow
-    2. ApiKeyAuthProvider.__init__: for direct instantiation when pjwt_auth_enabled=False
+    ``resolve_auth_provider`` covers client-config and JWT-enabled holder flows.
+    Holder- and client-local ``ApiKeyAuthProvider`` bindings cover direct
+    construction without changing tinker's original provider class.
     """
+    import tinker._client as _client
     import tinker.lib._auth_token_provider as _atp
     import tinker.lib.internal_client_holder as _ich
 
     if getattr(_atp, "_mint_auth_patch_applied", False):
         return
 
-    # Patch 1: resolve_auth_provider (existing)
     original_resolve = _atp.resolve_auth_provider
+    original_api_key_provider = _atp.ApiKeyAuthProvider
 
     def _mint_resolve_auth_provider(api_key, enforce_cmd):
         key = api_key or os.environ.get("TINKER_API_KEY", "")
@@ -58,24 +57,18 @@ def apply_auth_patch() -> None:
             return MintApiKeyAuthProvider(key)
         return original_resolve(api_key, enforce_cmd)
 
+    def _mint_api_key_auth_provider(api_key=None):
+        key = api_key or os.environ.get("TINKER_API_KEY", "")
+        if isinstance(key, str) and key.startswith(MINT_API_KEY_PREFIX):
+            return MintApiKeyAuthProvider(key)
+        return original_api_key_provider(api_key=api_key)
+
     _mint_resolve_auth_provider._mint_original = original_resolve
+    _mint_api_key_auth_provider._mint_original = original_api_key_provider
     _atp.resolve_auth_provider = _mint_resolve_auth_provider
     _ich.resolve_auth_provider = _mint_resolve_auth_provider
-
-    # Patch 2: ApiKeyAuthProvider.__init__ (new)
-    # Handles direct instantiation in internal_client_holder.py:245
-    original_init = _atp.ApiKeyAuthProvider.__init__
-
-    def _patched_api_key_init(self, *, api_key):
-        if isinstance(api_key, str) and api_key.startswith(MINT_API_KEY_PREFIX):
-            # Accept sk- keys by setting _token directly, bypassing prefix check
-            self._token = api_key
-        else:
-            # Use original logic for tml- keys
-            original_init(self, api_key=api_key)
-
-    _atp.ApiKeyAuthProvider.__init__ = _patched_api_key_init
-
+    _ich.ApiKeyAuthProvider = _mint_api_key_auth_provider
+    _client.ApiKeyAuthProvider = _mint_api_key_auth_provider
     _atp._mint_auth_patch_applied = True
 
 
