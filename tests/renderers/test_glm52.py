@@ -1,4 +1,3 @@
-/usr/bin/bash: warning: setlocale: LC_ALL: cannot change locale (en_US.UTF-8)
 """Default-suite contract tests for the GLM-5.2 Tinker renderer."""
 
 from __future__ import annotations
@@ -7,7 +6,12 @@ import json
 from typing import Any, ClassVar
 
 import pytest
-pytest.importorskip("tinker_cookbook")
+
+pytest.importorskip(
+    "tinker_cookbook.renderers",
+    reason="install mindlab-toolkit[test] to run GLM-5.2 renderer tests",
+)
+
 from tinker_cookbook.exceptions import RendererError
 from tinker_cookbook.renderers import (
     Message,
@@ -24,6 +28,7 @@ from mint.renderers import (
     GLM52DisableThinkingRenderer,
     GLM52Renderer,
 )
+from mint.renderers import glm52 as glm52_module
 
 
 class CharacterTokenizer:
@@ -622,6 +627,23 @@ def test_tool_reference_context_is_isolated_between_conversations(
     assert '"name": "tool_b"' not in rendered_a
     assert '"name": "tool_b"' in rendered_b
     assert '"name": "tool_a"' not in rendered_b
+
+
+@pytest.mark.parametrize("supervised", [False, True])
+def test_invalid_tool_context_does_not_leak_active_messages(
+    tokenizer: CharacterTokenizer, supervised: bool
+):
+    renderer = GLM52Renderer(tokenizer)
+    invalid_prefix = Message(role="system", content="invalid tool context")
+    invalid_prefix["_mint_glm52_tools"] = "not-a-tool-list"  # type: ignore[typeddict-unknown-key]
+
+    assert glm52_module._ACTIVE_MESSAGES.get() is None
+    with pytest.raises(RendererError, match="invalid GLM-5.2 tool context"):
+        if supervised:
+            renderer.build_supervised_example([invalid_prefix])
+        else:
+            renderer.build_generation_prompt([invalid_prefix])
+    assert glm52_module._ACTIVE_MESSAGES.get() is None
 
 
 def test_stop_sequences_are_all_atomic_glm_protocol_boundaries(

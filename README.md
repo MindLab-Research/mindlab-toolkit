@@ -148,9 +148,48 @@ assistant = Message(
 )
 ```
 
-For migration compatibility, assistant messages from the previous GLM-5.2 SFT pipeline may instead carry a string `reasoning_content` key. Do not provide both forms. The disable-thinking renderer rejects reasoning-bearing messages so training cannot silently disagree with its inference prompt.
+Existing records from the previous GLM-5.2 SFT pipeline can use the legacy OpenAI-style shape instead, without preprocessing:
+
+```python
+legacy_assistant = {
+    "role": "assistant",
+    "reasoning_content": "I should answer briefly.",
+    "content": "I am GLM-5.2.",
+}
+```
+
+Use either a `ThinkingPart` in `content` or the legacy string `reasoning_content`, never both on the same message. New code should prefer `ThinkingPart`. The disable-thinking renderer rejects either representation because its inference prompt explicitly disables reasoning.
 
 Tool definitions are added with `renderer.create_conversation_prefix_with_tools(...)`. The renderer emits and parses GLM-5.2's `<tool_call>...<arg_key>...<arg_value>...</tool_call>` format and uses `<|observation|>` / `<|user|>` as sampling stops. Its SFT builder supervises those assistant-produced boundaries while keeping role headers and the pre-filled `<think>` scaffold at zero weight.
+
+Install the test extra before running the repository's default test suite:
+
+```bash
+python -m pip install -e '.[test]'
+python -m pytest tests/
+```
+
+The default suite excludes the external GLM-5.2 SFT parity tests. To run them, clone `MindLab-Research/agent-model-training-mono` next to this repository (or set `GLM52_SFT_REFERENCE_DIR` to its `glm52_sft` directory), then override the default marker selection:
+
+```bash
+python -m pytest -o addopts='' -m integration tests/renderers/test_glm52_sft_parity.py
+```
+
+### Strict GLM-5.2 dataset validation
+
+Validate every JSONL record through both the strict on-disk contract and the real Tinker renderer before training. `--max-seq-len` is required and must equal the training setting; the validator fails closed when it is unknown.
+
+```bash
+python -m pip install -e '.[glm52-renderer]'
+mint-validate-glm52-sft \
+    --data training.glm52_sft.jsonl \
+    --max-seq-len 98304 \
+    --report validation-report.json
+```
+
+The command rejects malformed JSONL, duplicate keys, unknown fields, protocol-marker injection, ambiguous reasoning fields, broken tool pairing, undeclared tools, renderer failures, invalid masks, and samples with no supervised tokens. It reports truncation, duplicate records, unusual supervised-token ratios, and sequences near the configured limit. Exit code `0` means the dataset is trainable, `1` means fatal data violations, and `2` means an environment/configuration error.
+
+Repository agents can use the checked-in [`glm52-sft-validator` skill](.agents/skills/glm52-sft-validator/SKILL.md) for the fail-closed validation workflow and report interpretation.
 
 ## Documentation
 

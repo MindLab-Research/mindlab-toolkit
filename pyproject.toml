@@ -25,8 +25,16 @@ dependencies = [
     "tinker==0.22.0",
 ]
 
+[project.scripts]
+mint-validate-glm52-sft = "mint.validation.glm52_sft:main"
+
 [project.optional-dependencies]
 glm52-renderer = [
+    "tinker-cookbook>=0.4.0,<0.4.2",
+]
+test = [
+    "pip>=23",
+    "pytest>=8",
     "tinker-cookbook>=0.4.0,<0.4.2",
 ]
 
@@ -38,7 +46,7 @@ packages = ["src/mint"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-m 'not integration'"
+addopts = ["-m", "not integration"]
 markers = [
     "integration: tests requiring an external reference checkout or network access",
 ]

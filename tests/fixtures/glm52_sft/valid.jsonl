@@ -1,0 +1,1 @@
+{"messages":[{"role":"user","content":"What is 2 + 2?"},{"role":"assistant","content":[{"type":"thinking","thinking":"Add the two integers."},{"type":"text","text":"4"}]}],"chat_template_kwargs":{"reasoning_effort":"high"},"meta":{"id":"fixture-valid-thinking"}}

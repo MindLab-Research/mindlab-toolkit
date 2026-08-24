@@ -497,8 +497,9 @@ class GLM52Renderer(Renderer):
         role: str = "assistant",
         prefill: str | None = None,
     ) -> tinker.ModelInput:
+        tool_specs = _tool_specs_from_messages(messages)
         active_messages = _ACTIVE_MESSAGES.set(tuple(messages))
-        active_tools = _ACTIVE_TOOL_SPECS.set(_tool_specs_from_messages(messages))
+        active_tools = _ACTIVE_TOOL_SPECS.set(tool_specs)
         try:
             return super().build_generation_prompt(messages, role=role, prefill=prefill)
         finally:
@@ -510,8 +511,9 @@ class GLM52Renderer(Renderer):
         messages: list[Message],
         train_on_what: TrainOnWhat = TrainOnWhat.LAST_ASSISTANT_MESSAGE,
     ) -> tuple[tinker.ModelInput, torch.Tensor]:
+        tool_specs = _tool_specs_from_messages(messages)
         active_messages = _ACTIVE_MESSAGES.set(tuple(messages))
-        active_tools = _ACTIVE_TOOL_SPECS.set(_tool_specs_from_messages(messages))
+        active_tools = _ACTIVE_TOOL_SPECS.set(tool_specs)
         try:
             model_input, weights = super().build_supervised_example(
                 messages, train_on_what

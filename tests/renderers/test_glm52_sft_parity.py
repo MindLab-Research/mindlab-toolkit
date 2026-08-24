@@ -17,7 +17,12 @@ from types import ModuleType
 from typing import Any, cast
 
 import pytest
-pytest.importorskip("tinker_cookbook")
+
+pytest.importorskip(
+    "tinker_cookbook.renderers",
+    reason="install mindlab-toolkit[test] to run GLM-5.2 renderer tests",
+)
+
 from tinker_cookbook.renderers import Message, ToolCall, ToolSpec, TrainOnWhat
 
 from mint.renderers import GLM52DisableThinkingRenderer, GLM52Renderer
