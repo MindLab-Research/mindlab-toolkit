@@ -45,8 +45,14 @@ Thumbs.db
 PROMPT.md
 LOG.md
 
-# Local-only test suite (not tracked)
+# Local-only test suite, except feature tests intentionally run by default
 tests/
+!tests/
+tests/*
+!tests/renderers/
+tests/renderers/*
+!tests/renderers/test_glm52.py
+!tests/renderers/test_glm52_sft_parity.py
 
 # Agent scaffolding (local-only)
 .codex/

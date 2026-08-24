@@ -25,8 +25,20 @@ dependencies = [
     "tinker==0.22.0",
 ]
 
+[project.optional-dependencies]
+glm52-renderer = [
+    "tinker-cookbook>=0.4.0,<0.4.2",
+]
+
 [project.urls]
 Homepage = "https://macaron.im/mindlab"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/mint"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-m 'not integration'"
+markers = [
+    "integration: tests requiring an external reference checkout or network access",
+]

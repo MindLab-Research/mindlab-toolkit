@@ -102,6 +102,56 @@ mintx.forward_backward_reverse_kl(
 
 Use this namespace for MinT-specific extensions that should not appear in the default top-level `mint` surface. The current extensions are the MinT-only endpoints `forward_backward_reverse_kl` and `interpolate_checkpoints`.
 
+## GLM-5.2 Tinker Renderer
+
+Install the optional renderer dependencies:
+
+```bash
+python -m pip install 'mindlab-toolkit[glm52-renderer]'
+```
+
+The extra selects Tinker Cookbook 0.4.0/0.4.1, whose Renderer API is compatible with this release's validated `tinker==0.22.0` pin.
+
+Importing `mint.renderers` registers three namespaced renderers with Tinker Cookbook:
+
+- `MindLab/glm52`: thinking enabled, `Reasoning Effort: Max`
+- `MindLab/glm52_high_reasoning`: thinking enabled, `Reasoning Effort: High`
+- `MindLab/glm52_disable_thinking`: thinking disabled with `<think></think>` pre-filled
+
+```python
+from mint.renderers import GLM52_RENDERER
+from tinker_cookbook.renderers import Message, get_renderer
+from tinker_cookbook.tokenizer_utils import get_tokenizer
+
+model_name = "zai-org/GLM-5.2"
+tokenizer = get_tokenizer(model_name)
+renderer = get_renderer(
+    GLM52_RENDERER,
+    tokenizer,
+    model_name=model_name,
+)
+
+prompt = renderer.build_generation_prompt(
+    [Message(role="user", content="Who are you?")]
+)
+```
+
+Use Tinker's structured `ThinkingPart` for reasoning-bearing assistant messages:
+
+```python
+assistant = Message(
+    role="assistant",
+    content=[
+        {"type": "thinking", "thinking": "I should answer briefly."},
+        {"type": "text", "text": "I am GLM-5.2."},
+    ],
+)
+```
+
+For migration compatibility, assistant messages from the previous GLM-5.2 SFT pipeline may instead carry a string `reasoning_content` key. Do not provide both forms. The disable-thinking renderer rejects reasoning-bearing messages so training cannot silently disagree with its inference prompt.
+
+Tool definitions are added with `renderer.create_conversation_prefix_with_tools(...)`. The renderer emits and parses GLM-5.2's `<tool_call>...<arg_key>...<arg_value>...</tool_call>` format and uses `<|observation|>` / `<|user|>` as sampling stops. Its SFT builder supervises those assistant-produced boundaries while keeping role headers and the pre-filled `<think>` scaffold at zero weight.
+
 ## Documentation
 
 Read the MinT documentation at [mint-doc.macaron.im](https://mint-doc.macaron.im).
