@@ -49,6 +49,7 @@ LOG.md
 tests/
 !tests/
 tests/*
+!tests/test_qwen36_training.py
 !tests/renderers/
 tests/renderers/*
 !tests/renderers/test_glm52.py

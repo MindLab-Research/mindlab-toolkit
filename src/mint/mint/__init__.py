@@ -27,7 +27,7 @@ from ._mintx import (
 MINT_VERSION = "0.2.0"
 MINT_GLOBAL_BASE_URL = "https://mint.macaron.im/train"
 MINT_CHINA_BASE_URL = "https://mintcn.macaron.xin/train"
-_MINT_DEFAULT_BASE_URL = MINT_GLOBAL_BASE_URL
+_MINT_DEFAULT_BASE_URL = MINT_CHINA_BASE_URL
 _PATCH_STATE = {"applied": False}
 
 

@@ -9,7 +9,7 @@ This example demonstrates:
 4. Loading the tokenizer
 
 Prerequisites:
-    export MINT_BASE_URL=https://mint-training-api.macaron.xin
+    export MINT_BASE_URL=https://mintcn.macaron.xin/train
     export MINT_API_KEY=your-api-key-here
 """
 
@@ -25,7 +25,7 @@ def main():
     if not base_url or not api_key:
         print("Error: MINT_BASE_URL and MINT_API_KEY must be set")
         print("\nExample:")
-        print("  export MINT_BASE_URL=https://mint-training-api.macaron.xin")
+        print("  export MINT_BASE_URL=https://mintcn.macaron.xin/train")
         print("  export MINT_API_KEY=your-key-here")
         return 1
 
@@ -53,8 +53,10 @@ def main():
     for model in models:
         print(f"     - {model.model_name} (context: {model.max_context_length})")
 
-    # Use the first available model
-    model_name = models[0].model_name
+    model_name = "Qwen/Qwen3.6-35B-A3B"
+    if model_name not in {model.model_name for model in models}:
+        print(f"   ✗ Required model is unavailable: {model_name}")
+        return 1
 
     # Step 3: Create TrainingClient
     print(f"\n3. Creating LoRA TrainingClient...")

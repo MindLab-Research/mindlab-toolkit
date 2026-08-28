@@ -39,18 +39,18 @@ The Python package version (`0.2.0`) and this repository's release tags (for exa
 
 ## Usage
 
-Global endpoint, which is also the default:
+China endpoint, which is also the default:
+
+```bash
+export MINT_API_KEY=tml-...
+export MINT_BASE_URL=https://mintcn.macaron.xin/train
+```
+
+Global endpoint:
 
 ```bash
 export MINT_API_KEY=sk-...
 export MINT_BASE_URL=https://mint.macaron.im/train
-```
-
-China endpoint:
-
-```bash
-export MINT_API_KEY=sk-...
-export MINT_BASE_URL=https://mintcn.macaron.xin/train
 ```
 
 Then create clients through MinT's Tinker-compatible surface:
@@ -59,6 +59,30 @@ Then create clients through MinT's Tinker-compatible surface:
 import mint
 
 service_client = mint.ServiceClient()
+```
+
+### Qwen3.6 SFT from scratch
+
+Install the optional Tinker Cookbook renderer, then run the same training
+loop against either SDK surface. `--backend tinker` is the reference path;
+`--backend mint` uses MinT with identical datums and optimizer settings.
+
+```bash
+python -m pip install -e '.[glm52-renderer]'
+export MINT_API_KEY=tml-...
+python scripts/train_qwen36_sft.py \
+  --data 'C:\Users\trots\Downloads\sft__merged__balanced_v3__multiturn(1).jsonl' \
+  --backend mint
+```
+
+For a GLM-5.2 reproducibility check, first convert inline Qwen thinking blocks,
+then run two independent 10-step MinT clients:
+
+```bash
+python scripts/convert_qwen_rollout_to_glm52.py input.jsonl glm52.jsonl
+export MINT_API_KEY=tml-...
+export MINT_BASE_URL=http://your-mint-endpoint
+python scripts/train_glm52_sft.py --data glm52.jsonl --runs 2 --max-steps 10
 ```
 
 A non-empty `MINT_API_KEY` takes precedence over `TINKER_API_KEY` for the process. A non-empty `MINT_BASE_URL` similarly takes precedence over `TINKER_BASE_URL`; an explicit client constructor `base_url` remains the final override. Both supported deployment URLs retain their `/train` prefix.
@@ -78,7 +102,7 @@ Then switch your credentials and endpoint to MinT.
 Why this matters:
 
 - raw upstream `import tinker` keeps Tinker's original behavior: `tml-` and `eyJ...` are accepted, while `sk-` is rejected
-- MinT keys start with `sk-`
+- MinT keys may use `sk-`; the supplied `tml-` key also follows Tinker's native path
 - `import mint` validates Tinker 0.22.0 and patches its confirmed standard client construction paths for MinT keys
 - Tinker's original `ApiKeyAuthProvider` class remains unchanged and still rejects `sk-` when called directly
 

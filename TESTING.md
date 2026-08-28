@@ -6,7 +6,7 @@ Verify the MinT SDK is working correctly:
 
 ```bash
 # Set credentials
-export MINT_BASE_URL=https://mint-training-api.macaron.xin
+export MINT_BASE_URL=https://mintcn.macaron.xin/train
 export MINT_API_KEY=your-api-key
 
 # Run example
@@ -17,7 +17,7 @@ Expected output:
 ```
 MinT SDK Example - v0.2.0
 ============================================================
-Endpoint: https://mint-training-api.macaron.xin
+Endpoint: https://mintcn.macaron.xin/train
 API Key: your-api-key...
 
 1. Creating ServiceClient...
@@ -46,8 +46,8 @@ API Key: your-api-key...
 
 | Endpoint | Status | Notes |
 |----------|--------|-------|
-| `https://mint-training-api.macaron.xin` | ✓ Working | Recommended endpoint |
-| `https://mintcn.macaron.xin/train` | ✓ Working | Alternative endpoint |
+| `https://mintcn.macaron.xin/train` | ✓ Working | Default endpoint |
+| `https://mint.macaron.im/train` | ✓ Working | Global endpoint |
 | `https://mint-cn.macaron.xin/` | ⚠️ Auth issues | Key registration required |
 
 ### Tested Functionality
