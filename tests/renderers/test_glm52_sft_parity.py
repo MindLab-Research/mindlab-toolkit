@@ -1,10 +1,24 @@
 """Opt-in parity tests against the original GLM-5.2 SFT renderer.
 
-These tests intentionally use the real ``zai-org/GLM-5.2`` tokenizer and the
-SHA-pinned Jinja template/loss-mask implementation from
-``MindLab-Research/agent-model-training-mono/glm52_sft``.  They run whenever
-that reference checkout is available next to this repository, or when
-``GLM52_SFT_REFERENCE_DIR`` points at it.
+OPT-IN / NOT RUN IN CI BY DEFAULT.  Every test here is marked
+``pytest.mark.integration`` and the default ``addopts = ["-m", "not integration"]``
+(see ``pyproject.toml``) excludes it, so neither the local default suite nor the
+Tests CI workflow executes it.  Treat "GLM-5.2 SFT parity" as covered ONLY when
+this file is run explicitly.
+
+These tests intentionally use the real ``zai-org/GLM-5.2`` tokenizer (downloaded
+via ``transformers``, i.e. network) and the SHA-pinned Jinja template/loss-mask
+implementation from ``MindLab-Research/agent-model-training-mono/glm52_sft``.
+
+To run them explicitly::
+
+    # clone the reference next to this repo, or point at it:
+    export GLM52_SFT_REFERENCE_DIR=/path/to/agent-model-training-mono/glm52_sft
+    pip install -e ".[test]" transformers
+    pytest -m integration tests/renderers/test_glm52_sft_parity.py
+
+They self-skip (never fail) when the reference checkout or ``transformers`` is
+missing, so running the whole suite with ``-m integration`` stays safe.
 """
 
 from __future__ import annotations

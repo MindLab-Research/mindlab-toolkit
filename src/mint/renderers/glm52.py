@@ -374,6 +374,13 @@ class GLM52Renderer(Renderer):
     ``reasoning_effort='max'`` matches the tokenizer template default.  Use
     ``'high'`` for the lower-effort supported mode.  Historical reasoning is
     preserved, which gives this renderer Tinker's sequence extension property.
+
+    ``supervise_reasoning=False`` renders an identical token sequence but moves
+    the assistant ``<think>{reasoning}</think>`` block into the header. Modes
+    that leave headers unsupervised (the usual assistant-only settings) then
+    train only the visible answer/tool calls. ``ALL_TOKENS`` still applies loss
+    to headers, including that think span. Orthogonal to ``reasoning_effort``
+    and ``enable_thinking``.
     """
 
     supports_streaming = False
@@ -384,6 +391,7 @@ class GLM52Renderer(Renderer):
         *,
         reasoning_effort: Literal["high", "max"] = "max",
         enable_thinking: bool = True,
+        supervise_reasoning: bool = True,
     ):
         super().__init__(tokenizer)
         if reasoning_effort not in ("high", "max"):
@@ -391,6 +399,7 @@ class GLM52Renderer(Renderer):
         self.reasoning_effort = reasoning_effort
         self.enable_thinking = bool(enable_thinking)
         self.disables_thinking = not self.enable_thinking
+        self.supervise_reasoning = bool(supervise_reasoning)
 
         prefix = _GMASK_SOP
         if self.enable_thinking:
@@ -445,16 +454,22 @@ class GLM52Renderer(Renderer):
                     "GLM-5.2 thinking is disabled, but the assistant message contains "
                     "ThinkingPart/reasoning_content"
                 )
-            header = _encoded_chunk(self.tokenizer, self._assistant_header())
+            header_text = self._assistant_header()
             output_text = ""
             if self.enable_thinking:
-                output_text += reasoning + _THINK_CLOSE
+                if self.supervise_reasoning:
+                    output_text += reasoning + _THINK_CLOSE
+                else:
+                    # Keep the chain-of-thought in the sequence; put it in the
+                    # header so modes that skip headers do not train it.
+                    header_text += reasoning + _THINK_CLOSE
             if content.strip():
                 output_text += content.strip()
             tool_calls = list(message.get("tool_calls", []))
             if tool_calls:
                 output_text += _render_tool_calls(tool_calls)
             output_text += self._boundary_after_assistant(ctx)
+            header = _encoded_chunk(self.tokenizer, header_text)
             output = (
                 [_encoded_chunk(self.tokenizer, output_text)] if output_text else []
             )

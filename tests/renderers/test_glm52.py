@@ -877,3 +877,74 @@ def test_to_openai_preserves_tool_response_identifiers(
         "tool_call_id": "call-7",
         "name": "lookup",
     }
+
+
+def test_unsupervised_reasoning_keeps_sequence_but_masks_cot(
+    tokenizer: CharacterTokenizer,
+):
+    """supervise_reasoning=False: CoT stays in the sequence; default
+    assistant-only TrainOnWhat then trains only the visible answer."""
+    messages = [
+        Message(role="user", content="question"),
+        {"role": "assistant", "reasoning_content": "reason", "content": "answer"},
+    ]
+    supervised = GLM52Renderer(tokenizer)
+    masked = GLM52Renderer(tokenizer, supervise_reasoning=False)
+
+    sup_input, sup_weights = supervised.build_supervised_example(list(messages))
+    msk_input, msk_weights = masked.build_supervised_example(list(messages))
+
+    # Identical token sequence: only the loss mask differs.
+    assert msk_input.to_ints() == sup_input.to_ints()
+    assert _decode(tokenizer, msk_input) == (
+        "[gMASK]<sop><|system|>Reasoning Effort: Max"
+        "<|user|>question<|assistant|><think>reason</think>answer<|user|>"
+    )
+    # Generation prompt (inference) is unaffected: supervise_reasoning is a
+    # loss-masking switch for SFT, not a serving/prompt concern.
+    assert (
+        masked.build_generation_prompt(messages[:-1]).to_ints()
+        == supervised.build_generation_prompt(messages[:-1]).to_ints()
+    )
+
+    ints = msk_input.to_ints()
+    weights = msk_weights.tolist()
+    prompt_length = masked.build_generation_prompt(messages[:-1]).length
+    cot = tokenizer.encode("reason</think>")
+    cot_end = prompt_length + len(cot)
+
+    # Header (through <think>) and the reasoning</think> span carry no loss.
+    assert weights[:cot_end] == [0.0] * cot_end
+    assert ints[prompt_length:cot_end] == cot
+    # Only the visible answer + boundary is trained.
+    assert weights[cot_end:] == [1.0] * (len(weights) - cot_end)
+    assert tokenizer.decode(ints[cot_end:]) == "answer<|user|>"
+
+    # The supervised renderer would have trained the whole CoT instead.
+    assert sup_weights.tolist()[prompt_length:cot_end] == [1.0] * len(cot)
+
+
+def test_unsupervised_reasoning_follows_train_on_what(
+    tokenizer: CharacterTokenizer,
+):
+    masked = GLM52Renderer(tokenizer, supervise_reasoning=False)
+    messages = [
+        Message(role="user", content="q1"),
+        {"role": "assistant", "reasoning_content": "r1", "content": "a1"},
+        Message(role="user", content="q2"),
+        {"role": "assistant", "reasoning_content": "r2", "content": "a2"},
+    ]
+
+    model_input, weights = masked.build_supervised_example(
+        messages, TrainOnWhat.ALL_ASSISTANT_MESSAGES
+    )
+    ints = model_input.to_ints()
+    trained = tokenizer.decode(
+        [ints[i] for i, w in enumerate(weights.tolist()) if w == 1.0]
+    )
+
+    # Every supervised assistant contributes only its answer + boundary; no
+    # reasoning text and no <think> scaffolding is ever trained.
+    assert trained == "a1<|user|>a2<|user|>"
+    assert "r1" not in trained and "r2" not in trained
+    assert "<think>" not in trained and "</think>" not in trained
