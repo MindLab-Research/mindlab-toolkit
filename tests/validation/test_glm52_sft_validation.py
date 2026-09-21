@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -12,6 +13,8 @@ import pytest
 
 from mint.validation.glm52_sft import (
     EnvironmentValidationError,
+    ValidationReport,
+    _RecordValidator,
     main,
     validate_jsonl,
 )
@@ -73,6 +76,17 @@ def _write_jsonl(path: Path, records: list[dict[str, Any]]) -> Path:
 
 def _rules(report: Any) -> set[str]:
     return {finding.rule for finding in report.findings}
+
+
+def _l1_report(record: dict[str, Any]) -> Any:
+    """L1 only: no tinker-cookbook / renderer extra required."""
+    report = ValidationReport(data_path="memory")
+    _RecordValidator(report, 1, record).run()
+    return report
+
+
+def _l1_rules(record: dict[str, Any]) -> set[str]:
+    return _rules(_l1_report(record))
 
 
 def _valid_record() -> dict[str, Any]:
@@ -160,7 +174,7 @@ def test_rejects_duplicate_json_keys_without_loading_tokenizer(tmp_path: Path) -
             {
                 "messages": [
                     {"role": "user", "content": "q"},
-                    {"role": "assistant", "content": "<think>handwritten</think>a"},
+                    {"role": "assistant", "content": "inject <|assistant|> boundary"},
                 ]
             },
             "protocol-injection",
@@ -187,10 +201,100 @@ def test_rejects_duplicate_json_keys_without_loading_tokenizer(tmp_path: Path) -
                     {"role": "user", "content": "q"},
                     {
                         "role": "assistant",
-                        "reasoning_content": "escape</think>answer",
+                        "reasoning_content": "escape<|user|>answer",
                         "content": "a",
                     },
                 ]
+            },
+            "protocol-injection",
+        ),
+        (
+            {
+                "messages": [
+                    {"role": "user", "content": "q"},
+                    {
+                        "role": "assistant",
+                        "reasoning_content": "STILL</think>REASON",
+                        "content": "a",
+                    },
+                ]
+            },
+            "protocol-injection",
+        ),
+        (
+            {
+                "messages": [
+                    {"role": "user", "content": "q"},
+                    {
+                        "role": "assistant",
+                        "content": [
+                            {"type": "thinking", "thinking": "x</think>y"},
+                            {"type": "text", "text": "a"},
+                        ],
+                    },
+                ]
+            },
+            "protocol-injection",
+        ),
+        (
+            {
+                "messages": [
+                    {"role": "user", "content": "q"},
+                    {
+                        "role": "assistant",
+                        "content": "a",
+                        "tool_calls": [
+                            {
+                                "function": {
+                                    "name": "lookup",
+                                    "arguments": {"q": "x</think>y"},
+                                }
+                            }
+                        ],
+                    },
+                    {
+                        "role": "tool",
+                        "name": "lookup",
+                        "content": "ok",
+                    },
+                ],
+                "tools": [
+                    {
+                        "name": "lookup",
+                        "parameters": {"type": "object"},
+                    }
+                ],
+            },
+            "protocol-injection",
+        ),
+        (
+            {
+                "messages": [
+                    {"role": "user", "content": "q"},
+                    {
+                        "role": "assistant",
+                        "content": "a",
+                        "tool_calls": [
+                            {
+                                "function": {
+                                    "name": "lookup<think>",
+                                    "arguments": {"q": "x"},
+                                }
+                            }
+                        ],
+                    },
+                    {
+                        "role": "tool",
+                        "name": "lookup<think>",
+                        "content": "ok",
+                    },
+                ],
+                "tools": [
+                    {
+                        "name": "lookup<think>",
+                        "parameters": {"type": "object"},
+                    }
+                ],
             },
             "protocol-injection",
         ),
@@ -238,6 +342,29 @@ def test_rejects_duplicate_json_keys_without_loading_tokenizer(tmp_path: Path) -
             },
             "disabled-thinking-data",
         ),
+        (
+            {
+                "messages": [
+                    {"role": "user", "content": "q"},
+                    {"role": "assistant", "content": "REASON</think>COMMONCONTENT"},
+                ],
+                "chat_template_kwargs": {"enable_thinking": False},
+            },
+            "disabled-thinking-data",
+        ),
+        (
+            {
+                "messages": [
+                    {"role": "user", "content": "q"},
+                    {
+                        "role": "assistant",
+                        "content": [{"type": "text", "text": "</think>ANSWER"}],
+                    },
+                ],
+                "chat_template_kwargs": {"enable_thinking": False},
+            },
+            "disabled-thinking-data",
+        ),
     ],
 )
 def test_structural_contract_fails_closed(
@@ -250,6 +377,397 @@ def test_structural_contract_fails_closed(
     assert report.exit_code == 1
     assert rule in _rules(report)
     assert report.rendered_records == 0
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "mentions </think> please",
+        "mentions <think> please",
+        [{"type": "text", "text": "mentions </think> please"}],
+        [{"type": "text", "text": "mentions <think> please"}],
+    ],
+)
+def test_literal_think_tags_in_content_are_not_protocol_injection(
+    tmp_path: Path, content: Any
+) -> None:
+    pytest.importorskip("tinker_cookbook.renderers")
+    record = {
+        "messages": [
+            {"role": "user", "content": "q"},
+            {
+                "role": "assistant",
+                "reasoning_content": "plain reason",
+                "content": content,
+            },
+        ],
+        "meta": {"id": "literal-think-tags-content"},
+    }
+    data = _write_jsonl(tmp_path / "literal.jsonl", [record])
+
+    report = validate_jsonl(
+        data,
+        max_seq_len=1024,
+        tokenizer=CharacterTokenizer(),
+        supervised_fraction_low=0.0,
+        supervised_fraction_high=1.0,
+    )
+
+    assert "protocol-injection" not in _rules(report)
+    assert report.fatal_count == 0
+    assert report.exit_code == 0
+    assert report.rendered_records == 1
+
+
+@pytest.mark.parametrize(
+    ("role", "content"),
+    [
+        ("user", "see <think>x</think> please"),
+        ("user", "has <think> only"),
+        ("user", "has </think> only"),
+        ("system", "see <think>x</think> please"),
+        ("system", "has <think> only"),
+        ("system", "has </think> only"),
+    ],
+)
+def test_user_literal_think_tags_warn_only(
+    tmp_path: Path, role: str, content: str
+) -> None:
+    pytest.importorskip("tinker_cookbook.renderers")
+    record = {
+        "messages": [
+            {"role": role, "content": content},
+            {"role": "user", "content": "q"} if role == "system" else None,
+            {"role": "assistant", "content": "ok"},
+        ],
+        "meta": {"id": "user-literal-think-tags"},
+    }
+    record["messages"] = [item for item in record["messages"] if item is not None]
+    data = _write_jsonl(tmp_path / "user-tags.jsonl", [record])
+
+    report = validate_jsonl(
+        data,
+        max_seq_len=1024,
+        tokenizer=CharacterTokenizer(),
+        supervised_fraction_low=0.0,
+        supervised_fraction_high=1.0,
+    )
+
+    assert "protocol-injection" not in _rules(report)
+    assert "literal-think-tags" in _rules(report)
+    assert report.fatal_count == 0
+    assert report.exit_code == 0
+    assert report.rendered_records == 1
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "REASON</think>",
+        "REASON</think>\n",
+        "REASON</think>  ",
+        ["REASON</think>\n"],
+        [{"type": "text", "text": "REASON</think>\n  "}],
+    ],
+)
+def test_assistant_leftover_without_answer_warns_only(
+    tmp_path: Path, content: Any
+) -> None:
+    pytest.importorskip("tinker_cookbook.renderers")
+    record = {
+        "messages": [
+            {"role": "user", "content": "q"},
+            {"role": "assistant", "content": content},
+        ],
+        "meta": {"id": "leftover-empty-answer"},
+    }
+    data = _write_jsonl(tmp_path / "empty-leftover.jsonl", [record])
+
+    report = validate_jsonl(
+        data,
+        max_seq_len=1024,
+        tokenizer=CharacterTokenizer(),
+        supervised_fraction_low=0.0,
+        supervised_fraction_high=1.0,
+    )
+
+    assert "leftover-empty-answer" in _rules(report)
+    assert report.fatal_count == 0
+    assert report.exit_code == 0
+    assert report.rendered_records == 1
+
+
+@pytest.mark.parametrize(
+    "assistant",
+    [
+        {"reasoning_content": "plain reason", "content": "REASON</think>"},
+        {
+            "content": [
+                {"type": "thinking", "thinking": "plain reason"},
+                {"type": "text", "text": "REASON</think>"},
+            ]
+        },
+        {"content": "see <think>x</think> please"},
+        {"content": "<think>"},
+        {"content": "<think></think>ANSWER"},
+        {"content": "</think>ANSWER"},
+    ],
+)
+def test_leftover_empty_answer_warning_skips_non_empty_or_structured(
+    tmp_path: Path, assistant: dict[str, Any]
+) -> None:
+    pytest.importorskip("tinker_cookbook.renderers")
+    record = {
+        "messages": [
+            {"role": "user", "content": "q"},
+            {"role": "assistant", **assistant},
+        ],
+        "meta": {"id": "leftover-empty-answer-skip"},
+    }
+    data = _write_jsonl(tmp_path / "skip-empty-leftover.jsonl", [record])
+
+    report = validate_jsonl(
+        data,
+        max_seq_len=1024,
+        tokenizer=CharacterTokenizer(),
+        supervised_fraction_low=0.0,
+        supervised_fraction_high=1.0,
+    )
+
+    assert "leftover-empty-answer" not in _rules(report)
+    assert "protocol-injection" not in _rules(report)
+    assert report.fatal_count == 0
+    assert report.exit_code == 0
+    assert report.rendered_records == 1
+
+
+def test_reasoning_source_lives_outside_renderers_package() -> None:
+    import mint.reasoning_source as reasoning_source
+
+    assert Path(reasoning_source.__file__).resolve().parent.name == "mint"
+
+
+def test_reasoning_source_import_does_not_load_renderers() -> None:
+    repo = Path(__file__).resolve().parents[2]
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import mint.reasoning_source, sys; "
+            "assert 'mint.renderers' not in sys.modules",
+        ],
+        cwd=repo,
+        env={**os.environ, "PYTHONPATH": str(repo / "src")},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr or result.stdout
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "mentions </think> please",
+        "mentions <think> please",
+        [{"type": "text", "text": "mentions </think> please"}],
+        [{"type": "text", "text": "mentions <think> please"}],
+        "REASON</think>",
+        ["REASON</think>"],
+        [{"type": "text", "text": "REASON</think>"}],
+        "</think>ANSWER",
+    ],
+)
+def test_l1_literal_think_tags_are_not_protocol_injection(content: Any) -> None:
+    rules = _l1_rules(
+        {
+            "messages": [
+                {"role": "user", "content": "q"},
+                {"role": "assistant", "content": content},
+            ]
+        }
+    )
+    assert "protocol-injection" not in rules
+
+
+def test_l1_empty_leftover_answer_warns_for_string_and_list() -> None:
+    for content in (
+        "REASON</think>",
+        "REASON</think>\n",
+        "REASON</think>  ",
+        ["REASON</think>\n"],
+        [{"type": "text", "text": "REASON</think>\n  "}],
+    ):
+        rules = _l1_rules(
+            {
+                "messages": [
+                    {"role": "user", "content": "q"},
+                    {"role": "assistant", "content": content},
+                ]
+            }
+        )
+        assert "leftover-empty-answer" in rules
+
+
+def test_l1_empty_leftover_warning_skips_when_field_present() -> None:
+    rules = _l1_rules(
+        {
+            "messages": [
+                {"role": "user", "content": "q"},
+                {
+                    "role": "assistant",
+                    "reasoning_content": "plain reason",
+                    "content": "REASON</think>",
+                },
+            ]
+        }
+    )
+    assert "leftover-empty-answer" not in rules
+
+
+def test_l1_media_payload_think_tags_are_protocol_injection() -> None:
+    report = _l1_report(
+        {
+            "messages": [
+                {"role": "user", "content": "q"},
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "text", "text": "ok"},
+                        {"type": "image", "image": "see <think>x</think>"},
+                    ],
+                },
+            ]
+        }
+    )
+    assert "protocol-injection" in _rules(report)
+    assert any(
+        "媒体字段不是可见答案" in finding.fix for finding in report.findings
+    )
+
+
+def test_l1_image_caption_is_not_leftover() -> None:
+    rules = _l1_rules(
+        {
+            "messages": [
+                {"role": "user", "content": "q"},
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "image",
+                            "image": "x",
+                            "text": "REASON</think>",
+                        }
+                    ],
+                },
+            ]
+        }
+    )
+    assert "leftover-empty-answer" not in rules
+    assert "disabled-thinking-data" not in rules
+    assert "protocol-injection" in rules
+
+
+def test_l1_disable_thinking_rejects_leftover_not_lone_open_tag() -> None:
+    leftover_rules = _l1_rules(
+        {
+            "messages": [
+                {"role": "user", "content": "q"},
+                {"role": "assistant", "content": "REASON</think>COMMONCONTENT"},
+            ],
+            "chat_template_kwargs": {"enable_thinking": False},
+        }
+    )
+    assert "disabled-thinking-data" in leftover_rules
+
+    open_only = _l1_rules(
+        {
+            "messages": [
+                {"role": "user", "content": "q"},
+                {"role": "assistant", "content": "<think>"},
+            ],
+            "chat_template_kwargs": {"enable_thinking": False},
+        }
+    )
+    assert "disabled-thinking-data" not in open_only
+    assert "protocol-injection" not in open_only
+
+
+def test_fixture_disabled_leftover_is_l1_fatal() -> None:
+    repo = Path(__file__).resolve().parents[2]
+    data = repo / "tests/fixtures/glm52_sft/invalid_disabled_leftover.jsonl"
+    report = validate_jsonl(data, max_seq_len=1024, tokenizer=object())
+    assert report.exit_code == 1
+    assert "disabled-thinking-data" in _rules(report)
+    assert report.rendered_records == 0
+
+
+@pytest.mark.parametrize(
+    "tool_content",
+    [
+        "sunny </think> leftover",
+        "sunny <think> leftover",
+        [{"output": "sunny </think> leftover"}],
+        [{"output": "sunny <think> leftover"}],
+        [{"type": "text", "text": "sunny </think> leftover"}],
+        [{"type": "text", "text": "sunny <think> leftover"}],
+    ],
+)
+def test_literal_think_tags_in_tool_observation_are_not_protocol_injection(
+    tmp_path: Path, tool_content: Any
+) -> None:
+    pytest.importorskip("tinker_cookbook.renderers")
+    record = _valid_record()
+    record["messages"][2]["content"] = tool_content
+    record["meta"] = {"id": "literal-think-tags-tool-obs"}
+    data = _write_jsonl(tmp_path / "literal-tool.jsonl", [record])
+
+    report = validate_jsonl(
+        data,
+        max_seq_len=1024,
+        tokenizer=CharacterTokenizer(),
+        supervised_fraction_low=0.0,
+        supervised_fraction_high=1.0,
+    )
+
+    assert "protocol-injection" not in _rules(report)
+    assert report.fatal_count == 0
+    assert report.exit_code == 0
+    assert report.rendered_records == 1
+
+
+def test_literal_think_tags_in_text_part_are_not_protocol_injection(
+    tmp_path: Path,
+) -> None:
+    pytest.importorskip("tinker_cookbook.renderers")
+    record = {
+        "messages": [
+            {"role": "user", "content": "q"},
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "thinking", "thinking": "plain reason"},
+                    {"type": "text", "text": "see <think>x</think> please"},
+                ],
+            },
+        ],
+        "meta": {"id": "literal-think-tags-text-part"},
+    }
+    data = _write_jsonl(tmp_path / "literal-text.jsonl", [record])
+
+    report = validate_jsonl(
+        data,
+        max_seq_len=1024,
+        tokenizer=CharacterTokenizer(),
+        supervised_fraction_low=0.0,
+        supervised_fraction_high=1.0,
+    )
+
+    assert "protocol-injection" not in _rules(report)
+    assert report.fatal_count == 0
+    assert report.exit_code == 0
+    assert report.rendered_records == 1
 
 
 def test_tool_calls_require_immediate_one_to_one_responses(tmp_path: Path) -> None:

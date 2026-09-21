@@ -736,10 +736,6 @@ def test_invalid_content_parts_fail_loudly(
             "either reasoning_content or ThinkingPart",
         ),
         (
-            {"role": "assistant", "content": "<think>inline</think>a"},
-            "inline <think> markers",
-        ),
-        (
             {
                 "role": "assistant",
                 "content": [{"type": "thinking", "thinking": 3}],
@@ -755,6 +751,56 @@ def test_invalid_reasoning_shapes_fail_loudly(
 
     with pytest.raises(RendererError, match=error):
         renderer.build_supervised_example([message])  # type: ignore[list-item]
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "see <think>x</think> please",
+        [{"type": "text", "text": "see <think>x</think> please"}],
+    ],
+)
+def test_literal_think_tags_in_answer_are_plain_text(
+    tokenizer: CharacterTokenizer, content
+):
+    # Model answers may mention <think>/</think>; that is visible text, not CoT.
+    messages = [
+        Message(role="user", content="q"),
+        {"role": "assistant", "content": content},
+    ]
+    supervised = GLM52Renderer(tokenizer)
+    masked = GLM52Renderer(tokenizer, supervise_reasoning=False)
+
+    sup_input, sup_weights = supervised.build_supervised_example(list(messages))
+    msk_input, msk_weights = masked.build_supervised_example(list(messages))
+    assert msk_input.to_ints() == sup_input.to_ints()
+    assert "see <think>x</think> please" in _decode(tokenizer, msk_input)
+
+    def _trained(model_input, weights) -> str:
+        ints = model_input.to_ints()
+        return tokenizer.decode(
+            [ints[i] for i, w in enumerate(weights.tolist()) if w == 1.0]
+        )
+
+    assert _trained(msk_input, msk_weights) == "see <think>x</think> please<|user|>"
+    assert _trained(sup_input, sup_weights) == (
+        "</think>see <think>x</think> please<|user|>"
+    )
+
+    with_field = [
+        Message(role="user", content="q"),
+        {
+            "role": "assistant",
+            "reasoning_content": "reason",
+            "content": "mentions </think> ANSWER",
+        },
+    ]
+    field_sup, field_sup_w = supervised.build_supervised_example(list(with_field))
+    field_msk, field_msk_w = masked.build_supervised_example(list(with_field))
+    assert field_msk.to_ints() == field_sup.to_ints()
+    assert _trained(field_msk, field_msk_w) == "mentions </think> ANSWER<|user|>"
+    assert "reason" in _trained(field_sup, field_sup_w)
+    assert "mentions </think> ANSWER" in _trained(field_sup, field_sup_w)
 
 
 def test_invalid_reasoning_effort_is_rejected(tokenizer: CharacterTokenizer):
@@ -858,6 +904,13 @@ def test_parse_without_stop_and_disable_scaffold_normalization(
     assert incomplete["content"][-1] == {"type": "text", "text": "answer"}
     assert normalized_termination == ParseTermination.STOP_SEQUENCE
     assert normalized["content"] == "answer"
+
+    # Bare close is visible text on the disable-thinking path, not empty CoT.
+    bare, bare_termination = disabled.parse_response(
+        tokenizer.encode("</think>ANSWER<|user|>")
+    )
+    assert bare_termination == ParseTermination.STOP_SEQUENCE
+    assert bare["content"] == "</think>ANSWER"
 
 
 def test_to_openai_preserves_tool_response_identifiers(

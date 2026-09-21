@@ -34,7 +34,7 @@ Read [references/contract.md](references/contract.md) when diagnosing a finding,
 ## Invariants
 
 - Use the same tokenizer/model and sequence limit as training.
-- Treat `ThinkingPart` and legacy `reasoning_content` as mutually exclusive representations; prefer `ThinkingPart` for new data.
+- Treat `ThinkingPart` and legacy `reasoning_content` as mutually exclusive representations; prefer `ThinkingPart` for new data. Literal `<think>` / `</think>` in visible text (string `content`, text parts, bare strings in a content list, and tool observation text — string or structured `{output: ...}`) are not a third reasoning source and not a fatal protocol injection. The same tags in `system` / `user` visible text warn only. An assistant leftover with an empty or whitespace-only answer after `</think>` warns only when leftover promotion actually applies (no field or ThinkingPart). `enable_thinking=false` plus a leftover is fatal. A lone `<think>` is visible text, not leftover. The same tags stay fatal in `reasoning_content`, ThinkingPart payloads, media-part payloads (image/audio/video URL or path fields), tool names, tool arguments, tool definitions, and `tool_reference` names.
 - Treat `enable_thinking=false` plus any reasoning-bearing assistant message as fatal.
 - Require tool calls and immediately following tool responses to pair one-for-one and reference declared tools.
 - Never downgrade renderer rejection, missing supervision, mask-length mismatch, or unknown configuration to a warning.

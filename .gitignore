@@ -53,6 +53,8 @@ tests/*
 tests/renderers/*
 !tests/renderers/test_glm52.py
 !tests/renderers/test_glm52_sft_parity.py
+!tests/renderers/test_qwen35.py
+!tests/renderers/test_reasoning_contract.py
 !tests/validation/
 tests/validation/*
 !tests/validation/test_glm52_sft_validation.py
@@ -62,6 +64,7 @@ tests/fixtures/*
 tests/fixtures/glm52_sft/*
 !tests/fixtures/glm52_sft/valid.jsonl
 !tests/fixtures/glm52_sft/invalid_protocol.jsonl
+!tests/fixtures/glm52_sft/invalid_disabled_leftover.jsonl
 
 # Agent scaffolding (local-only)
 .codex/

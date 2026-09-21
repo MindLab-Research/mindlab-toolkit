@@ -13,6 +13,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Literal, cast
 
+from mint.reasoning_source import split_serving_fragment
+
 FATAL = "fatal"
 WARNING = "warning"
 
@@ -41,8 +43,6 @@ _PROTOCOL_MARKERS = (
     "<|assistant|>",
     "<|observation|>",
     "<|endoftext|>",
-    "<think>",
-    "</think>",
     "<tool_call>",
     "</tool_call>",
     "<arg_key>",
@@ -54,6 +54,20 @@ _PROTOCOL_MARKERS = (
     "<tools>",
     "</tools>",
 )
+_THINK_MARKERS = ("<think>", "</think>")
+_PREFIX_MARKERS = ("[gMASK]<sop>", "[gMASK]", "<sop>")
+
+
+def _protocol_fix(marker: str, *, site: str = "payload") -> str:
+    if site == "media":
+        if marker in _THINK_MARKERS:
+            return "媒体字段不是可见答案，不要写 <think> / </think>。"
+        return "媒体字段不要写 renderer 保留标记。"
+    if marker in _PREFIX_MARKERS:
+        return "移除手写 GLM 前缀脚手架；[gMASK]<sop> 由 renderer 自动添加。"
+    if marker in _THINK_MARKERS:
+        return "该字段的 think 边界由 renderer 从结构化推理生成，不要手写 <think>。"
+    return "移除手写角色/工具协议标记；该边界由 renderer 生成。"
 
 
 class EnvironmentValidationError(RuntimeError):
@@ -195,29 +209,88 @@ class _RecordValidator:
                 "补齐数据契约要求的字段。",
             )
 
-    def protocol_strings(self, value: Any, path: str) -> None:
+    def _warn_visible_think_tags(self, text: str, path: str, role: str) -> None:
+        if role not in {"system", "user"}:
+            return
+        if not any(marker in text for marker in _THINK_MARKERS):
+            return
+        self.warning(
+            "L1",
+            "literal-think-tags",
+            path,
+            f"{role} 可见文本含字面 <think> / </think>，只当普通文本，不会变成 CoT",
+            "确认是引用或脏数据；不要指望 renderer 从 user/system 提升推理。",
+        )
+
+    def _warn_empty_leftover_answer(self, value: Any, path: str) -> None:
+        fragment = split_serving_fragment(value)
+        if fragment is None:
+            return
+        _reason, visible = fragment
+        # GLM strips visible text before write; whitespace-only is the same
+        # as an empty answer. Qwen does not strip, but a leftover whose
+        # answer is only spaces/newlines is still poor data.
+        if visible.strip() != "":
+            return
+        self.warning(
+            "L1",
+            "leftover-empty-answer",
+            path,
+            "serving 残片在 </think> 之后没有可见答案，整段进了推理",
+            "补上闭合后的答案，或改写成 reasoning_content + content。",
+        )
+
+    def protocol_strings(
+        self,
+        value: Any,
+        path: str,
+        *,
+        allow_think_tags: bool = False,
+        site: str = "payload",
+    ) -> None:
+        markers = (
+            _PROTOCOL_MARKERS
+            if allow_think_tags
+            else (*_PROTOCOL_MARKERS, *_THINK_MARKERS)
+        )
         if isinstance(value, str):
-            marker = next((item for item in _PROTOCOL_MARKERS if item in value), None)
+            marker = next((item for item in markers if item in value), None)
             if marker is not None:
                 self.fatal(
                     "L1",
                     "protocol-injection",
                     path,
                     f"原始数据包含 renderer 保留标记 {marker!r}",
-                    "移除手写协议标记，thinking/tool 边界必须由结构化字段生成。",
+                    _protocol_fix(marker, site=site),
                 )
         elif isinstance(value, list):
             for index, item in enumerate(value):
-                self.protocol_strings(item, f"{path}[{index}]")
+                self.protocol_strings(
+                    item,
+                    f"{path}[{index}]",
+                    allow_think_tags=allow_think_tags,
+                    site=site,
+                )
         elif isinstance(value, Mapping):
             for key, item in value.items():
-                self.protocol_strings(str(key), f"{path}.<key>")
-                self.protocol_strings(item, f"{path}.{key}")
+                self.protocol_strings(
+                    str(key),
+                    f"{path}.<key>",
+                    allow_think_tags=allow_think_tags,
+                    site=site,
+                )
+                self.protocol_strings(
+                    item,
+                    f"{path}.{key}",
+                    allow_think_tags=allow_think_tags,
+                    site=site,
+                )
 
     def content(self, value: Any, *, role: str, path: str) -> tuple[bool, list[str]]:
         """Validate content and return thinking signal plus tool references."""
-        self.protocol_strings(value, path)
         if isinstance(value, str):
+            self.protocol_strings(value, path, allow_think_tags=True)
+            self._warn_visible_think_tags(value, path, role)
             return False, []
         if not isinstance(value, list) or not value:
             self.fatal(
@@ -234,6 +307,7 @@ class _RecordValidator:
         if role == "tool" and isinstance(value[0], Mapping):
             first = value[0]
             if first.get("type") == "tool_reference":
+                self.protocol_strings(value, path)
                 for index, item in enumerate(value):
                     item_path = f"{path}[{index}]"
                     if not isinstance(item, Mapping):
@@ -268,6 +342,10 @@ class _RecordValidator:
                         references.append(name)
                 return False, references
             if "output" in first:
+                # Same visible observation as string tool content: both render
+                # as <tool_response> payload. Think tags here are answer text,
+                # not protocol. tool_reference names stay strict below.
+                self.protocol_strings(value, path, allow_think_tags=True)
                 for index, item in enumerate(value):
                     item_path = f"{path}[{index}]"
                     if not isinstance(item, Mapping):
@@ -298,6 +376,8 @@ class _RecordValidator:
         for index, item in enumerate(value):
             item_path = f"{path}[{index}]"
             if isinstance(item, str):
+                self.protocol_strings(item, item_path, allow_think_tags=True)
+                self._warn_visible_think_tags(item, item_path, role)
                 continue
             if not isinstance(item, Mapping):
                 self.fatal(
@@ -324,6 +404,11 @@ class _RecordValidator:
                         "text part 的 text 必须是字符串",
                         "把 text 转换为字符串。",
                     )
+                else:
+                    self.protocol_strings(
+                        item["text"], f"{item_path}.text", allow_think_tags=True
+                    )
+                    self._warn_visible_think_tags(item["text"], f"{item_path}.text", role)
             elif part_type == "thinking":
                 thinking = True
                 self.exact_keys(
@@ -348,7 +433,12 @@ class _RecordValidator:
                         "ThinkingPart.thinking 必须是字符串",
                         "把推理内容转换为字符串。",
                     )
+                else:
+                    self.protocol_strings(item["thinking"], f"{item_path}.thinking")
             elif part_type in _MEDIA_TYPES:
+                # Media payloads (URL, path, metadata) are not visible
+                # answer text. Think tags here stay protocol-injection.
+                self.protocol_strings(item, item_path, site="media")
                 continue
             else:
                 self.fatal(
@@ -652,6 +742,18 @@ class _RecordValidator:
             thinking, references = self.content(
                 raw_message.get("content"), role=role, path=f"{path}.content"
             )
+            # Leftover does not run when a field or ThinkingPart is already
+            # present; content="REASON</think>" is then visible answer text.
+            # split_serving_fragment accepts string / list / text parts —
+            # this is the only call site (not inside content()).
+            if (
+                role == "assistant"
+                and "reasoning_content" not in raw_message
+                and not thinking
+            ):
+                self._warn_empty_leftover_answer(
+                    raw_message.get("content"), f"{path}.content"
+                )
             for name in references:
                 if name not in self.tool_names:
                     self.fatal(
@@ -778,13 +880,16 @@ class _RecordValidator:
                         isinstance(part, Mapping) and part.get("type") == "thinking"
                         for part in content
                     )
-                    if "reasoning_content" in message or structured:
+                    # Third reasoning source only. A lone "<think>" with no
+                    # close is visible text, not leftover — do not fatal.
+                    leftover = split_serving_fragment(content) is not None
+                    if "reasoning_content" in message or structured or leftover:
                         self.fatal(
                             "L1",
                             "disabled-thinking-data",
                             f"messages[{index}]",
                             "enable_thinking=false 的记录仍包含推理内容",
-                            "删除推理字段，或启用 thinking renderer。",
+                            "删除推理字段或 serving 残片，或启用 thinking renderer。",
                         )
 
     def run(self) -> bool:

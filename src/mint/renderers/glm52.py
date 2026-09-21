@@ -31,6 +31,8 @@ from tinker_cookbook.renderers import (
 from tinker_cookbook.renderers.base import RenderedMessage, UnparsedToolCall
 from tinker_cookbook.tokenizer_utils import Tokenizer
 
+from mint.reasoning_source import split_serving_fragment
+
 GLM52_RENDERER = "MindLab/glm52"
 GLM52_HIGH_REASONING_RENDERER = "MindLab/glm52_high_reasoning"
 GLM52_DISABLE_THINKING_RENDERER = "MindLab/glm52_disable_thinking"
@@ -143,6 +145,11 @@ def _assistant_content(message: Message) -> tuple[bool, str, str]:
     Tinker represents reasoning with ``ThinkingPart``.  The legacy
     ``reasoning_content`` key is also accepted so existing GLM-5.2 SFT records
     can be handed to the renderer without a preprocessing pass.
+
+    Literal tags in visible ``content`` stay as answer text once a field or
+    ThinkingPart is present. A serving leftover ``REASON</think>ANSWER`` with
+    neither is promoted to ``reasoning_content`` (see README). Empty
+    ``REASON`` (``</think>ANSWER``) is the no-think serving leftover.
     """
     raw_message = cast(dict[str, Any], message)
     content = message["content"]
@@ -161,11 +168,12 @@ def _assistant_content(message: Message) -> tuple[bool, str, str]:
         return True, reasoning, _visible_text(content, allow_thinking=True)
 
     if isinstance(content, str):
-        if _THINK_OPEN in content or _THINK_CLOSE in content:
-            raise RendererError(
-                "inline <think> markers are not valid GLM-5.2 message content; "
-                "use a ThinkingPart or reasoning_content"
-            )
+        fragment = split_serving_fragment(content)
+        if fragment is not None:
+            # Leftover, including leftover+mention
+            # ("REASON</think>see <think>x</think>"). Visible is not
+            # stripped here; render_message strips once at write.
+            return True, fragment[0], fragment[1]
         return False, "", content
 
     reasoning_parts: list[str] = []
@@ -177,11 +185,12 @@ def _assistant_content(message: Message) -> tuple[bool, str, str]:
                     "GLM-5.2 ThinkingPart requires a string 'thinking' field"
                 )
             reasoning_parts.append(reasoning)
-    return (
-        bool(reasoning_parts),
-        "".join(reasoning_parts),
-        _visible_text(content, allow_thinking=True),
-    )
+    if reasoning_parts:
+        return True, "".join(reasoning_parts), _visible_text(content, allow_thinking=True)
+    fragment = split_serving_fragment(content)
+    if fragment is not None:
+        return True, fragment[0], fragment[1]
+    return False, "", _visible_text(content, allow_thinking=True)
 
 
 def _tool_arguments(tool_call: ToolCall) -> dict[str, Any]:
@@ -463,6 +472,10 @@ class GLM52Renderer(Renderer):
                     # Keep the chain-of-thought in the sequence; put it in the
                     # header so modes that skip headers do not train it.
                     header_text += reasoning + _THINK_CLOSE
+            # Official template strips visible_text. Same strip for field,
+            # ThinkingPart, leftover, and plain answers — do it here, not
+            # in _assistant_content, so tests that decode the wire see the
+            # stripped form for every writing.
             if content.strip():
                 output_text += content.strip()
             tool_calls = list(message.get("tool_calls", []))
@@ -579,6 +592,14 @@ class GLM52Renderer(Renderer):
         body = str(self.tokenizer.decode(body_tokens))
         reasoning: str | None = None
         if self.enable_thinking:
+            # Sampler output after the prefilled ``<think>``. First close
+            # ends the think span. This is serving parse, not leftover
+            # promotion: a completion that *is* ``see <think>x</think> please``
+            # is cut at the first close. Training records with that text go
+            # through render, not this method.
+            # Sampled ``</think>ANSWER`` after the prefilled ``<think>`` is
+            # empty CoT + answer — the reverse of leftover promotion, not a
+            # second contract.
             body = body.removeprefix(_THINK_OPEN)
             if _THINK_CLOSE in body:
                 reasoning, body = body.split(_THINK_CLOSE, 1)
@@ -587,6 +608,11 @@ class GLM52Renderer(Renderer):
                 body = ""
                 termination = ParseTermination.MALFORMED
         elif body.startswith(f"{_THINK_OPEN}{_THINK_CLOSE}"):
+            # Disable-thinking prompt already wrote ``<think></think>``.
+            # Strip that exact scaffold if it leaked into the sampled
+            # string. A bare ``</think>ANSWER`` is visible answer text
+            # (literal tags), not an empty-reasoning split — do not treat
+            # it like the thinking-enabled path.
             body = body[len(_THINK_OPEN) + len(_THINK_CLOSE) :]
 
         visible, tool_calls, unparsed = _parse_tool_calls(body)

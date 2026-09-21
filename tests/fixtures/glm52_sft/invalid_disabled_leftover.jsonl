@@ -1,0 +1,1 @@
+{"messages":[{"role":"user","content":"question"},{"role":"assistant","content":"REASON</think>COMMONCONTENT"}],"chat_template_kwargs":{"enable_thinking":false},"meta":{"id":"fixture-invalid-disabled-leftover"}}
