@@ -7,6 +7,8 @@ The file is UTF-8 without BOM. Each non-empty line is one JSON object with exact
 - `messages` (required, non-empty array)
 - `tools` (optional, non-empty array)
 - `chat_template_kwargs` (optional object)
+- `reasoning_effort` (optional string; OpenAI Chat Completions / Hugging Face / vLLM / Zhipu)
+- `reasoning` (optional object with only `effort`; OpenAI Responses)
 - `meta` (optional free-form object; use `meta.id` or `meta.source_id` for report identity)
 
 Unknown training fields are fatal. Put provenance and sampling metadata under `meta`.
@@ -25,7 +27,13 @@ Never put both representations on one message. New data should use the first for
 
 Tool-call `function.arguments` may be a JSON object (legacy dataset form) or a JSON string that decodes to an object (native Tinker form). Tool definitions may use OpenAI wrapped or Tinker bare form. Names must be unique, every call/reference must be declared, and N calls must be followed immediately by N tool messages in the same order.
 
-Supported `chat_template_kwargs` are `enable_thinking: boolean` and `reasoning_effort: high|max`. The old `clear_thinking` option is intentionally rejected because the new renderer preserves historical reasoning; silently accepting it would change training semantics.
+Reasoning effort is `low|high|max` and may be written in any of these equivalent places. When more than one is present, the values must match:
+
+- top-level `reasoning_effort`
+- `reasoning.effort` (`reasoning` has no other keys)
+- `chat_template_kwargs.reasoning_effort`
+
+`chat_template_kwargs` also accepts `enable_thinking: boolean`. The old `clear_thinking` option is intentionally rejected because the new renderer preserves historical reasoning; silently accepting it would change training semantics. Official GLM-5.3 templates treat unknown effort as `max`; this validator does not.
 
 ## Layers
 

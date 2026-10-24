@@ -16,6 +16,7 @@ from tinker_cookbook.exceptions import RendererError
 from tinker_cookbook.renderers import (
     Message,
     ParseTermination,
+    RenderContext,
     ToolCall,
     TrainOnWhat,
     get_renderer,
@@ -23,12 +24,14 @@ from tinker_cookbook.renderers import (
 
 from mint.renderers import (
     GLM52_DISABLE_THINKING_RENDERER,
-    GLM52_HIGH_REASONING_RENDERER,
     GLM52_RENDERER,
+    GLM53_RENDERER,
     GLM52DisableThinkingRenderer,
     GLM52Renderer,
+    GLM53Renderer,
 )
 from mint.renderers import glm52 as glm52_module
+from mint.renderers.glm52 import _strip_visible_edges
 
 
 class CharacterTokenizer:
@@ -108,16 +111,102 @@ def test_generation_prompt_matches_glm52_thinking_template(
     assert renderer.has_extension_property is True
 
 
-def test_generation_prompt_supports_high_and_disable_modes(
+@pytest.mark.parametrize(
+    ("renderer_cls", "effort"),
+    [
+        (GLM52Renderer, "high"),
+        (GLM52Renderer, "max"),
+        (GLM53Renderer, "low"),
+        (GLM53Renderer, "high"),
+        (GLM53Renderer, "max"),
+    ],
+)
+def test_reasoning_effort_only_changes_system_line(
+    tokenizer: CharacterTokenizer, renderer_cls: type, effort: str
+):
+    renderer = renderer_cls(tokenizer, reasoning_effort=effort)
+    messages = [
+        Message(role="user", content="hello"),
+        Message(
+            role="assistant",
+            reasoning_content="look up the city",
+            content="done",
+            tool_calls=[
+                ToolCall(
+                    id="call-1",
+                    function=ToolCall.FunctionBody(
+                        name="lookup",
+                        arguments=json.dumps({"city": "Paris"}),
+                    ),
+                )
+            ],
+        ),
+    ]
+    text = _decode(tokenizer, renderer.build_supervised_example(messages)[0])
+    label = effort.capitalize()
+    prefix = f"[gMASK]<sop><|system|>Reasoning Effort: {label}"
+    assert text.startswith(prefix)
+    assert "look up the city</think>done<tool_call>lookup" in text
+
+
+def test_reasoning_effort_levels_share_the_rest_of_the_sequence(
     tokenizer: CharacterTokenizer,
 ):
-    high = GLM52Renderer(tokenizer, reasoning_effort="high")
+    messages = [
+        Message(role="user", content="hello"),
+        Message(
+            role="assistant",
+            reasoning_content="look up the city",
+            content="done",
+            tool_calls=[
+                ToolCall(
+                    id="call-1",
+                    function=ToolCall.FunctionBody(
+                        name="lookup",
+                        arguments=json.dumps({"city": "Paris"}),
+                    ),
+                )
+            ],
+        ),
+    ]
+    tails = []
+    for effort in ("low", "high", "max"):
+        renderer = GLM53Renderer(tokenizer, reasoning_effort=effort)
+        text = _decode(tokenizer, renderer.build_supervised_example(list(messages))[0])
+        label = effort.capitalize()
+        prefix = f"[gMASK]<sop><|system|>Reasoning Effort: {label}"
+        assert text.startswith(prefix)
+        tails.append(text[len(prefix) :])
+    assert tails[0] == tails[1] == tails[2]
+
+
+def test_one_renderer_switches_effort_for_one_render(tokenizer: CharacterTokenizer):
+    renderer = GLM53Renderer(tokenizer)
+    messages = [Message(role="user", content="hello")]
+    default_text = _decode(tokenizer, renderer.build_generation_prompt(messages))
+    assert default_text.startswith("[gMASK]<sop><|system|>Reasoning Effort: Max")
+
+    with renderer.reasoning_effort_scope("low"):
+        low_text = _decode(tokenizer, renderer.build_generation_prompt(messages))
+    assert low_text.startswith("[gMASK]<sop><|system|>Reasoning Effort: Low")
+    assert renderer.reasoning_effort == "max"
+    restored = _decode(tokenizer, renderer.build_generation_prompt(messages))
+    assert restored.startswith("[gMASK]<sop><|system|>Reasoning Effort: Max")
+
+
+def test_strip_visible_edges_matches_concatenated_strip():
+    segments = [("  ", False), (" <|IMG|> ", True), (" \n", False)]
+    stripped = _strip_visible_edges(segments)
+    joined = "".join(text for text, _atomic in segments)
+    assert "".join(text for text, _atomic in stripped) == joined.strip()
+    assert stripped == [("<|IMG|>", True)]
+    assert _strip_visible_edges([("<|IMG|>", True)]) == [("<|IMG|>", True)]
+    assert _strip_visible_edges([("  hello  ", False)]) == [("hello", False)]
+
+
+def test_generation_prompt_supports_disable_mode(tokenizer: CharacterTokenizer):
     disabled = GLM52DisableThinkingRenderer(tokenizer)
     messages = [Message(role="user", content="hello")]
-
-    assert _decode(tokenizer, high.build_generation_prompt(messages)).startswith(
-        "[gMASK]<sop><|system|>Reasoning Effort: High"
-    )
     assert _decode(tokenizer, disabled.build_generation_prompt(messages)) == (
         "[gMASK]<sop><|user|>hello<|assistant|><think></think>"
     )
@@ -358,7 +447,7 @@ def test_media_parts_render_as_text_only_reminders(tokenizer: CharacterTokenizer
     ("name", "expected_type"),
     [
         (GLM52_RENDERER, GLM52Renderer),
-        (GLM52_HIGH_REASONING_RENDERER, GLM52Renderer),
+        (GLM53_RENDERER, GLM53Renderer),
         (GLM52_DISABLE_THINKING_RENDERER, GLM52DisableThinkingRenderer),
     ],
 )
@@ -804,8 +893,12 @@ def test_literal_think_tags_in_answer_are_plain_text(
 
 
 def test_invalid_reasoning_effort_is_rejected(tokenizer: CharacterTokenizer):
-    with pytest.raises(ValueError, match="must be 'high' or 'max'"):
-        GLM52Renderer(tokenizer, reasoning_effort="low")  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="high, max"):
+        GLM52Renderer(tokenizer, reasoning_effort="medium")
+    with pytest.raises(ValueError, match="high, max"):
+        GLM52Renderer(tokenizer, reasoning_effort="low")
+    with pytest.raises(ValueError, match="low, high, max"):
+        GLM53Renderer(tokenizer, reasoning_effort="medium")
 
 
 def test_empty_tool_arguments_render_as_an_empty_call(
@@ -1001,3 +1094,249 @@ def test_unsupervised_reasoning_follows_train_on_what(
     assert trained == "a1<|user|>a2<|user|>"
     assert "r1" not in trained and "r2" not in trained
     assert "<think>" not in trained and "</think>" not in trained
+
+
+class _BpePiece:
+    def __init__(self, token_id: int) -> None:
+        self.id = token_id
+
+
+class _CharBpe:
+    """One id per character, never an added-token id.
+
+    This stand-in does not model byte-level ``Ġ`` pieces. Production uses the
+    tokenizer's real BPE model. These tests only check that body text does not
+    receive atomic control ids.
+    """
+
+    def tokenize(self, text: str) -> list[_BpePiece]:
+        return [_BpePiece(ord(character)) for character in text]
+
+
+class _PlainBackend:
+    normalizer = None
+    pre_tokenizer = None
+    model = _CharBpe()
+
+
+class _AtomicThinkTokenizer(CharacterTokenizer):
+    """Character tokenizer whose encode() keeps GLM control strings atomic.
+
+    ``backend_tokenizer`` is the escape hatch the renderer uses for those
+    strings when they appear inside reasoning, answers, tool text, and
+    argument values.
+    """
+
+    THINK = 900_001
+    THINK_END = 900_002
+    TOOL_OPEN = 900_003
+    TOOL_CLOSE = 900_004
+    TOOL_CALL = 900_005
+    TOOL_CALL_END = 900_006
+
+    def __init__(self) -> None:
+        self.backend_tokenizer = _PlainBackend()
+        self.added_tokens_decoder = {
+            self.THINK: type("Added", (), {"content": "<think>"})(),
+            self.THINK_END: type("Added", (), {"content": "</think>"})(),
+            self.TOOL_OPEN: type("Added", (), {"content": "<tool_response>"})(),
+            self.TOOL_CLOSE: type("Added", (), {"content": "</tool_response>"})(),
+            self.TOOL_CALL: type("Added", (), {"content": "<tool_call>"})(),
+            self.TOOL_CALL_END: type("Added", (), {"content": "</tool_call>"})(),
+        }
+
+    def encode(self, text: str, add_special_tokens: bool = False, **_: Any) -> list[int]:
+        del add_special_tokens
+        atoms = (
+            ("<tool_response>", self.TOOL_OPEN),
+            ("</tool_response>", self.TOOL_CLOSE),
+            ("<tool_call>", self.TOOL_CALL),
+            ("</tool_call>", self.TOOL_CALL_END),
+            ("<think>", self.THINK),
+            ("</think>", self.THINK_END),
+        )
+        result: list[int] = []
+        position = 0
+        while position < len(text):
+            matched = next(
+                ((token, token_id) for token, token_id in atoms if text.startswith(token, position)),
+                None,
+            )
+            if matched is None:
+                special = next(
+                    (item for item in self._specials if text.startswith(item, position)),
+                    None,
+                )
+                if special is None:
+                    result.append(ord(text[position]))
+                    position += 1
+                else:
+                    result.append(self._token_by_text[special])
+                    position += len(special)
+            else:
+                token, token_id = matched
+                result.append(token_id)
+                position += len(token)
+        return result
+
+
+def test_added_tokens_inside_body_text_are_not_delimiters() -> None:
+    tokenizer = _AtomicThinkTokenizer()
+    renderer = GLM52Renderer(tokenizer)
+    user_id = tokenizer._token_by_text["<|user|>"]
+    assistant_role_id = tokenizer._token_by_text["<|assistant|>"]
+    observation_id = tokenizer._token_by_text["<|observation|>"]
+    assistant = renderer.render_message(
+        {
+            "role": "assistant",
+            "content": "answer",
+            "reasoning_content": "uses <think> </think> <|user|> and <tool_call>",
+        },
+        RenderContext(idx=1, is_last=False, prev_message={"role": "user", "content": "q"}),
+    )
+    header = list(assistant.header.tokens)
+    output = list(assistant.output[0].tokens)
+
+    assert header.count(tokenizer.THINK) == 1
+    assert tokenizer.THINK not in output
+    assert output.count(tokenizer.THINK_END) == 1
+    assert user_id not in output
+    assert tokenizer.TOOL_CALL not in output
+    assert ord("<") in output and ord("t") in output
+
+    visible = renderer.render_message(
+        {"role": "assistant", "content": "see <think>x</think> and <|assistant|>"},
+        RenderContext(idx=1, is_last=True, prev_message={"role": "user", "content": "q"}),
+    )
+    visible_header = list(visible.header.tokens)
+    visible_output = list(visible.output[0].tokens)
+    assert visible_header.count(tokenizer.THINK) == 1
+    assert visible_output.count(tokenizer.THINK_END) == 1
+    assert tokenizer.THINK not in visible_output
+    assert visible_output.count(assistant_role_id) == 0
+    assert ord("x") in visible_output
+
+    tool = renderer.render_message(
+        {"role": "tool", "content": "template {{- '<think></think>' <|observation|> }}"},
+        RenderContext(
+            idx=2,
+            is_last=True,
+            prev_message={"role": "assistant", "content": "answer"},
+        ),
+    )
+    tool_ids = list(tool.output[0].tokens)
+    assert tool_ids[0] == tokenizer.TOOL_OPEN
+    assert tool_ids[-1] == tokenizer.TOOL_CLOSE
+    assert tokenizer.THINK not in tool_ids
+    assert tokenizer.THINK_END not in tool_ids
+    assert observation_id not in tool_ids
+    assert ord("t") in tool_ids[1:-1]
+
+    system = renderer.render_message(
+        {"role": "system", "content": "quote <|assistant|>"},
+        RenderContext(idx=0, is_last=False, prev_message=None),
+    )
+    assert list(system.header.tokens) == [tokenizer._token_by_text["<|system|>"]]
+    assert assistant_role_id not in system.output[0].tokens
+
+    declared = renderer.create_conversation_prefix_with_tools(
+        [
+            {
+                "name": "live",
+                "description": "available",
+                "parameters": {"type": "object", "properties": {}},
+            }
+        ]
+    )[0]
+    declared_ids = list(
+        renderer.render_message(
+            declared,
+            RenderContext(idx=0, is_last=False, prev_message=None),
+        ).output[0].tokens
+    )
+    assert declared_ids.count(tokenizer.TOOL_CALL) == 1
+    assert declared_ids.count(tokenizer.TOOL_CALL_END) == 1
+
+    quoted_user = renderer.render_message(
+        {"role": "user", "content": "the marker is <|assistant|>"},
+        RenderContext(idx=0, is_last=False, prev_message=None),
+    )
+    assert list(quoted_user.header.tokens) == [user_id]
+    assert assistant_role_id not in quoted_user.output[0].tokens
+
+    call = renderer.render_message(
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [_tool_call("bash", {"cmd": "echo <|user|>"})],
+        },
+        RenderContext(idx=1, is_last=False, prev_message={"role": "user", "content": "q"}),
+    )
+    call_ids = list(call.output[0].tokens)
+    assert call_ids.count(tokenizer.TOOL_CALL) == 1
+    assert call_ids.count(tokenizer.TOOL_CALL_END) == 1
+    assert user_id not in call_ids
+
+    specs = (
+        {
+            "name": "live",
+            "description": "see <think> and <|user|>",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    )
+    active_specs = glm52_module._ACTIVE_TOOL_SPECS.set(specs)
+    try:
+        reference = renderer.render_message(
+            {
+                "role": "tool",
+                "content": [{"type": "tool_reference", "name": "live"}],
+            },
+            RenderContext(
+                idx=2,
+                is_last=True,
+                prev_message={"role": "assistant", "content": "answer"},
+            ),
+        )
+    finally:
+        glm52_module._ACTIVE_TOOL_SPECS.reset(active_specs)
+    reference_ids = list(reference.output[0].tokens)
+    assert reference_ids[0] == tokenizer.TOOL_OPEN
+    assert reference_ids[-1] == tokenizer.TOOL_CLOSE
+    assert tokenizer.THINK not in reference_ids
+    assert user_id not in reference_ids
+
+    structured = renderer.render_message(
+        {
+            "role": "tool",
+            "content": [
+                {"output": "alpha <think>"},
+                {"output": "beta <|observation|>"},
+            ],
+        },
+        RenderContext(
+            idx=2,
+            is_last=True,
+            prev_message={"role": "assistant", "content": "answer"},
+        ),
+    )
+    structured_ids = list(structured.output[0].tokens)
+    opens = [index for index, token in enumerate(structured_ids) if token == tokenizer.TOOL_OPEN]
+    closes = [index for index, token in enumerate(structured_ids) if token == tokenizer.TOOL_CLOSE]
+    alpha = structured_ids.index(ord("a"))
+    beta = structured_ids.index(ord("b"))
+    assert len(opens) == 2 and len(closes) == 2
+    assert opens[0] < alpha < closes[0] < opens[1] < beta < closes[1]
+    assert tokenizer.THINK not in structured_ids
+    assert observation_id not in structured_ids
+
+    nested = renderer.render_message(
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [_tool_call("bash", {"payload": {"cmd": "<tool_call>"}})],
+        },
+        RenderContext(idx=1, is_last=False, prev_message={"role": "user", "content": "q"}),
+    )
+    nested_ids = list(nested.output[0].tokens)
+    assert nested_ids.count(tokenizer.TOOL_CALL) == 1
+    assert nested_ids.count(tokenizer.TOOL_CALL_END) == 1

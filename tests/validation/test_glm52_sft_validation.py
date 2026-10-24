@@ -16,6 +16,7 @@ from mint.validation.glm52_sft import (
     ValidationReport,
     _RecordValidator,
     main,
+    resolve_reasoning_effort,
     validate_jsonl,
 )
 
@@ -78,10 +79,17 @@ def _rules(report: Any) -> set[str]:
     return {finding.rule for finding in report.findings}
 
 
-def _l1_report(record: dict[str, Any]) -> Any:
+def _l1_report(record: dict[str, Any], model_name: str = "zai-org/GLM-5.2") -> Any:
     """L1 only: no tinker-cookbook / renderer extra required."""
+    from mint.reasoning_effort import reasoning_efforts_for_model
+
     report = ValidationReport(data_path="memory")
-    _RecordValidator(report, 1, record).run()
+    _RecordValidator(
+        report,
+        1,
+        record,
+        reasoning_efforts=reasoning_efforts_for_model(model_name),
+    ).run()
     return report
 
 
@@ -365,6 +373,67 @@ def test_rejects_duplicate_json_keys_without_loading_tokenizer(tmp_path: Path) -
             },
             "disabled-thinking-data",
         ),
+        (
+            {
+                "messages": [
+                    {"role": "user", "content": "q"},
+                    {"role": "assistant", "content": "a"},
+                ],
+                "chat_template_kwargs": {"reasoning_effort": "medium"},
+            },
+            "reasoning-effort",
+        ),
+        (
+            {
+                "messages": [
+                    {"role": "user", "content": "q"},
+                    {"role": "assistant", "content": "a"},
+                ],
+                "reasoning_effort": "medium",
+            },
+            "reasoning-effort",
+        ),
+        (
+            {
+                "messages": [
+                    {"role": "user", "content": "q"},
+                    {"role": "assistant", "content": "a"},
+                ],
+                "reasoning": {"effort": "medium"},
+            },
+            "reasoning-effort",
+        ),
+        (
+            {
+                "messages": [
+                    {"role": "user", "content": "q"},
+                    {"role": "assistant", "content": "a"},
+                ],
+                "reasoning_effort": "high",
+                "chat_template_kwargs": {"reasoning_effort": "max"},
+            },
+            "reasoning-effort-conflict",
+        ),
+        (
+            {
+                "messages": [
+                    {"role": "user", "content": "q"},
+                    {"role": "assistant", "content": "a"},
+                ],
+                "reasoning": "high",
+            },
+            "reasoning-shape",
+        ),
+        (
+            {
+                "messages": [
+                    {"role": "user", "content": "q"},
+                    {"role": "assistant", "content": "a"},
+                ],
+                "reasoning": {"effort": "high", "summary": "auto"},
+            },
+            "unknown-field",
+        ),
     ],
 )
 def test_structural_contract_fails_closed(
@@ -377,6 +446,81 @@ def test_structural_contract_fails_closed(
     assert report.exit_code == 1
     assert rule in _rules(report)
     assert report.rendered_records == 0
+
+
+def _effort_record(effort: str, form: str) -> dict[str, Any]:
+    record: dict[str, Any] = {
+        "messages": [
+            {"role": "user", "content": "q"},
+            {"role": "assistant", "content": "a"},
+        ],
+    }
+    if form == "top-level":
+        record["reasoning_effort"] = effort
+    elif form == "responses":
+        record["reasoning"] = {"effort": effort}
+    else:
+        record["chat_template_kwargs"] = {"reasoning_effort": effort}
+    return record
+
+
+@pytest.mark.parametrize("effort", ["high", "max"])
+@pytest.mark.parametrize("form", ["top-level", "responses", "chat_template_kwargs"])
+def test_glm52_reasoning_efforts_pass_l1(effort: str, form: str) -> None:
+    report = _l1_report(_effort_record(effort, form))
+    assert "reasoning-effort" not in _rules(report)
+    assert report.fatal_count == 0
+    assert resolve_reasoning_effort(_effort_record(effort, form)) == effort
+
+
+@pytest.mark.parametrize("effort", ["low", "high", "max"])
+@pytest.mark.parametrize("form", ["top-level", "responses", "chat_template_kwargs"])
+def test_glm53_reasoning_efforts_pass_l1(effort: str, form: str) -> None:
+    report = _l1_report(_effort_record(effort, form), model_name="zai-org/GLM-5.3")
+    assert "reasoning-effort" not in _rules(report)
+    assert report.fatal_count == 0
+
+
+def test_glm52_rejects_low_reasoning_effort() -> None:
+    report = _l1_report(_effort_record("low", "chat_template_kwargs"))
+    assert "reasoning-effort" in _rules(report)
+
+
+def test_agreeing_effort_spellings_pass_l1() -> None:
+    record = {
+        "messages": [
+            {"role": "user", "content": "q"},
+            {"role": "assistant", "content": "a"},
+        ],
+        "reasoning_effort": "high",
+        "reasoning": {"effort": "high"},
+        "chat_template_kwargs": {
+            "enable_thinking": True,
+            "reasoning_effort": "high",
+        },
+    }
+    report = _l1_report(record)
+    assert report.fatal_count == 0
+    assert resolve_reasoning_effort(record) == "high"
+
+
+def test_resolve_reasoning_effort_rejects_conflict() -> None:
+    record = {
+        "reasoning_effort": "high",
+        "reasoning": {"effort": "max"},
+    }
+    with pytest.raises(ValueError, match="conflicting reasoning_effort"):
+        resolve_reasoning_effort(record)
+
+
+def test_resolve_reasoning_effort_defaults_to_max() -> None:
+    record = {
+        "messages": [
+            {"role": "user", "content": "q"},
+            {"role": "assistant", "content": "a"},
+        ],
+    }
+    assert resolve_reasoning_effort(record) == "max"
 
 
 @pytest.mark.parametrize(

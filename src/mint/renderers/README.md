@@ -10,14 +10,21 @@ MindForge 侧怎么选 renderer、怎么灌 tools，见仓库外文档 `MindForg
 
 | Cookbook 名 | 类 | 用途 |
 |---|---|---|
-| `MindLab/glm52` | `GLM52Renderer` | GLM-5.2/5.3，thinking 开，effort=max |
-| `MindLab/glm52_high_reasoning` | 同一个 `GLM52Renderer(reasoning_effort="high")` | 仅 system 文案改成 High |
-| `MindLab/glm52_disable_thinking` | `GLM52DisableThinkingRenderer` | thinking 关，header 预填 `<think></think>` |
+| `MindLab/glm52` | `GLM52Renderer` | GLM-5.2 文本；thinking 开，effort 只有 high / max，默认 max |
+| `MindLab/glm53` | `GLM53Renderer` | GLM-5.3 文本；effort 为 low / high / max，默认 max |
+| `MindLab/glm52_disable_thinking` | `GLM52DisableThinkingRenderer` | thinking 关，header 预填 `<think></think>`，不写 effort 行 |
+| `MindLab/glm53_flash` | `GLM53FlashRenderer` | GLM-5.3 文本 + Flash 原生图片 |
 | `MindLab/qwen35` | `Qwen35ReasoningRenderer` | Qwen3.5 格式；MindForge 用它覆盖 Qwen3.6 / 3.8 |
 
-`import mint.renderers` 时完成注册。Qwen 工厂固定 `strip_thinking_from_history=False`，历史轮的 think 块留在序列里，与 GLM 一致。这不是 CLI 开关。
+`import mint.renderers` 时完成注册。Qwen 工厂固定 `strip_thinking_from_history=False`，历史轮的 think 块留在序列里，与 GLM 一致。这不是 CLI 开关。`MindLab/glm52_high_reasoning` 仍注册，只是旧别名，不要再为 effort 加名字。
 
-`max` / `high` **不是两套渲染或 mask**。官方 chat template 在 thinking 开启时写一行 `<|system|>Reasoning Effort: Max` 或 `… High`，模型把这当成推理强度提示（默认 max；只有显式 `high` 才降档）。线格式、think 块、工具 XML、`supervise_reasoning` 切分完全相同。之所以有两个 Cookbook 名，是因为 `get_renderer(name, tokenizer)` 只收名字、传不进构造参数；实现仍是一个类。按记录覆盖时走 `chat_template_kwargs.reasoning_effort`，或直接 `GLM52Renderer(..., reasoning_effort=...)`，不必再复制一份逻辑。
+`reasoning_effort` **只改一行 system 文案**。官方 GLM-5.3 / 5.3-Flash：值在 `{low, high}` 时用该档，否则 `max`。thinking 开启时写 `<|system|>Reasoning Effort: {Max|High|Low}`。线格式、think 块、工具 XML、mask 不变。不要为 low/high 再注册 Cookbook 名；`get_renderer` 传不进构造参数。一条记录用下面任一写法，校验渲染收成同一个档位；写了多处则必须相同：
+
+- 顶层 `"reasoning_effort": "high"`（OpenAI Chat Completions、Hugging Face Inference、vLLM、智谱）
+- `"reasoning": {"effort": "high"}`（OpenAI Responses；这个对象只收 `effort`）
+- `"chat_template_kwargs": {"reasoning_effort": "high"}`（Hugging Face `apply_chat_template`）
+
+也可以直接构造对应的 renderer。官方 jinja 会把未知值静默当成 `max`；我们不跟。GLM-5.2 只收 `high` / `max`。GLM-5.3 和 Flash 收 `low` / `high` / `max`。一个实例在构造时编好每一档前缀。`reasoning_effort_scope` 只覆盖这一次渲染，结束后回到构造时的默认档。训练按类上的 `reasoning_efforts` 校验每一行。
 
 ## 共用契约
 
@@ -110,7 +117,7 @@ False output:  ANSWER…                       ← 只监督答案
 
 ```
 [gMASK]<sop>
-[<|system|>Reasoning Effort: Max|High]          # 仅 enable_thinking
+[<|system|>Reasoning Effort: Max|High|Low]      # 仅 enable_thinking
 <|user|>…<|assistant|><think>
   {reasoning}</think>{visible}{tool_calls}{next_boundary}
 ```
@@ -139,6 +146,29 @@ False output:  ANSWER…                       ← 只监督答案
 `parse_response`（thinking 开）解析的是生成 prompt 之后的采样结果：去掉可选的前缀 `<think>`，再按第一个 `</think>` 切开。推理正文里再写 `</think>` 会截断——这是解析语义，也是校验器对 `reasoning_content` 判 fatal 的原因。thinking 关时只剥恰好漏进采样串的 `<think></think>` 脚手架；裸 `</think>ANSWER` 当可见答案，不当空推理。
 
 残片提升是训练数据启发式，**不是**同一条规则：第一个 `</think>` 之前只要出现过完整 `<think>` 就不拆。因此抄进来的完整块、以及 `see <think>x</think> please`，渲染时整段当答案；不要用 `parse_response` 的行为去改提升。
+
+媒体 part（`image` / `image_url` / video / audio）写成无法处理的 `<reminder>…</reminder>` 字符串。不要改这条去迁就 Flash。
+
+---
+
+## GLM-5.3-Flash
+
+`GLM53FlashRenderer` **继承** `GLM52Renderer`。文本 / think / 工具 / effort / mask 走父类，无图时 token 序列必须与 `GLM52Renderer` 相同。
+
+媒体分两步，都钉官方 `zai-org/GLM-5.3-Flash`，不要走 Cookbook / Qwen：
+
+1. **模板**（`chat_template.jinja` `emit_*`）：先留下占位。
+2. **Processor**（Transformers `Glm5NextImageProcessor`）：和 GLM tokenizer 一样，不把文件打进这个包。默认 `Glm5NextImageProcessor.from_pretrained("zai-org/GLM-5.3-Flash")`，走 Hugging Face 缓存。调用方可以传 repo id 或本地目录；环境变量 `GLM53_FLASH_PROCESSOR` 只覆盖默认值。按图尺寸 `smart_resize` 后算 patch 数，`patches` 必须能被 `merge_size²` 整除，再把中间那枚 `<|image|>` 扩成 `N` 个。官方 `get_number_of_image_patches(height, width)` 的参数顺序是高、宽。这就是官方 `Glm5NextProcessor.replace_image_token`。
+
+| part | 交给 mint 的 token |
+|---|---|
+| `image` / `image_url` | `<|begin_of_image|>` + `<|image|>` × N + `<|end_of_image|>` |
+| `video` / `video_url` | `<|begin_of_video|><|video|><|end_of_video|>`（尚未接 `Glm5NextVideoProcessor`） |
+| `audio` / `audio_url` / `input_audio` | `<|begin_of_audio|><|end_of_audio|>` |
+
+有图必须传入官方 image processor（构造器 `image_processor=`，或 `load_glm53_flash_image_processor()`）。缺省报错，不要退回 5.2 reminder，也不要只写一枚 `<|image|>` 假装扩过。图数据收 PIL、本地路径、data URI；读失败是 `RendererError`。`image` / `image_url` 只用来取像素，占位仍只看 `type`。
+
+每次出现一张图就在 `renderer.mm_inputs` 追加一条，顺序与 token 里的图片一致，并带 `message_index`。同一张 PIL 在这一次渲染里只 preprocess 一次，后面的出现复用那份 `pixel_values` / `image_grid_thw`。`image_grid_thw` 必须是一行 `[t, h, w]`，乘积等于 `get_number_of_image_patches`。渲染中途失败会清空 `mm_inputs`。mint 当前仍只吃 token 序列。不要插入 Tinker `ImageChunk`。
 
 ---
 
@@ -213,3 +243,4 @@ True：`_mask_think_open` 只把 output 开头的 `<think>\n` 挪进 header。Fa
 4. 畸形 ThinkingPart 必须在 `build_supervised_example` 上失败。
 5. 生成 prompt 不得随 `supervise_reasoning` 变化。
 6. GLM 工具路径若有改动，与校验器、MindForge `native_tools_prefix` 对拍。
+7. Flash 无图序列必须与同输入的 `GLM52Renderer` 一致；有图用官方 `Glm5NextImageProcessor` 写出 `<|begin_of_image|>` + N 个 `<|image|>` + `<|end_of_image|>`，且 5.2 仍是 reminder。不要断言 `ImageChunk`。

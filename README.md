@@ -112,11 +112,11 @@ python -m pip install 'mindlab-toolkit[glm52-renderer]'
 
 The extra selects Tinker Cookbook 0.4.0/0.4.1, whose Renderer API is compatible with this release's validated `tinker==0.22.0` pin.
 
-Importing `mint.renderers` registers three namespaced renderers with Tinker Cookbook:
+Importing `mint.renderers` registers these namespaced renderers with Tinker Cookbook:
 
-- `MindLab/glm52`: thinking enabled, `Reasoning Effort: Max`
-- `MindLab/glm52_high_reasoning`: thinking enabled, `Reasoning Effort: High`
+- `MindLab/glm52`: thinking enabled, default `Reasoning Effort: Max` (`low` / `high` / `max` via constructor, top-level `reasoning_effort`, `reasoning.effort`, or `chat_template_kwargs.reasoning_effort`)
 - `MindLab/glm52_disable_thinking`: thinking disabled with `<think></think>` pre-filled
+- `MindLab/glm53_flash`: GLM-5.2 text path plus official `Glm5NextImageProcessor` image-token expansion
 
 ```python
 from mint.renderers import GLM52_RENDERER

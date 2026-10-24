@@ -11,7 +11,8 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Any, Literal, cast
 
@@ -31,11 +32,16 @@ from tinker_cookbook.renderers import (
 from tinker_cookbook.renderers.base import RenderedMessage, UnparsedToolCall
 from tinker_cookbook.tokenizer_utils import Tokenizer
 
+from mint.reasoning_effort import GLM52_REASONING_EFFORTS, GLM53_REASONING_EFFORTS
 from mint.reasoning_source import split_serving_fragment
 
 GLM52_RENDERER = "MindLab/glm52"
+GLM53_RENDERER = "MindLab/glm53"
 GLM52_HIGH_REASONING_RENDERER = "MindLab/glm52_high_reasoning"
 GLM52_DISABLE_THINKING_RENDERER = "MindLab/glm52_disable_thinking"
+# Union kept for callers that only need "is this spelling one of the families".
+# A renderer accepts only its own ``reasoning_efforts``.
+REASONING_EFFORTS = tuple(dict.fromkeys((*GLM52_REASONING_EFFORTS, *GLM53_REASONING_EFFORTS)))
 
 _GMASK_SOP = "[gMASK]<sop>"
 _SYSTEM = "<|system|>"
@@ -73,16 +79,77 @@ _ARG_RE = re.compile(
 _ACTIVE_MESSAGES: ContextVar[tuple[Message, ...] | None] = ContextVar(
     "mint_glm52_active_messages", default=None
 )
+# Set only for one render. Unset means the effort chosen when the renderer was built.
+_RENDER_EFFORT: ContextVar[str | None] = ContextVar("mint_glm_render_effort", default=None)
 _TOOL_CONTEXT_KEY = "_mint_glm52_tools"
 _ACTIVE_TOOL_SPECS: ContextVar[tuple[dict[str, Any], ...] | None] = ContextVar(
     "mint_glm52_active_tool_specs", default=None
 )
 
 
+def _encode_ids(tokenizer: Tokenizer, text: str) -> list[int]:
+    if not text:
+        return []
+    return list(tokenizer.encode(text, add_special_tokens=False))
+
+
+def _bpe_ids_without_added_tokens(tokenizer: Tokenizer, text: str) -> list[int] | None:
+    """Byte-level BPE of ``text``, skipping the added-token matcher.
+
+    Hugging Face ``split_special_tokens`` only splits tokens flagged
+    ``special: true``. GLM also registers control strings such as ``<think>``,
+    ``<tool_call>``, and ``<|user|>`` as added tokens with ``special: false``,
+    so that flag still emits them as one id. There is no tokenizer switch for
+    this case. Running the normalizer, pre-tokenizer, and BPE model directly
+    is the same path transformers uses to encode text that must not match an
+    added token.
+
+    Pretokenizer pieces may contain the byte-level space marker (``Ġ``).
+    ``model.tokenize`` accepts those pieces. Text with no added-token spelling
+    matches ``tokenizer.encode``. A spelling such as ``<|user|>`` is split, and
+    the space before it merges into the following characters (``Ġ<|`` rather
+    than a separate space plus one added-token id). That split is intentional.
+    """
+    backend = getattr(tokenizer, "backend_tokenizer", None)
+    model = getattr(backend, "model", None) if backend is not None else None
+    tokenize = getattr(model, "tokenize", None)
+    if backend is None or tokenize is None:
+        return None
+    normalizer = getattr(backend, "normalizer", None)
+    if normalizer is not None:
+        text = normalizer.normalize_str(text)
+    pre_tokenizer = getattr(backend, "pre_tokenizer", None)
+    if pre_tokenizer is not None:
+        pieces = [piece for piece, _ in pre_tokenizer.pre_tokenize_str(text)]
+    else:
+        pieces = [text]
+    return [int(token.id) for piece in pieces for token in tokenize(piece)]
+
+
+def _encode_body_ids(tokenizer: Tokenizer, text: str) -> list[int]:
+    """Encode data text so every added token is an ordinary BPE piece.
+
+    Role markers, the structural think tags, and tool wrappers are not passed
+    here. The renderer encodes those strings on their own with
+    :func:`_encode_ids`. A tokenizer without ``backend_tokenizer`` falls back
+    to :func:`_encode_ids`; the GLM fast tokenizer has that backend.
+    """
+    if not text:
+        return []
+    piece = _bpe_ids_without_added_tokens(tokenizer, text)
+    if piece is None:
+        return _encode_ids(tokenizer, text)
+    return piece
+
+
 def _encoded_chunk(tokenizer: Tokenizer, text: str) -> tinker.types.EncodedTextChunk:
-    return tinker.types.EncodedTextChunk(
-        tokens=tokenizer.encode(text, add_special_tokens=False)
-    )
+    return tinker.types.EncodedTextChunk(tokens=_encode_ids(tokenizer, text))
+
+
+def _chunk_from_ids(token_ids: list[int]) -> tinker.types.EncodedTextChunk | None:
+    if not token_ids:
+        return None
+    return tinker.types.EncodedTextChunk(tokens=token_ids)
 
 
 def _single_token_id(tokenizer: Tokenizer, token: str) -> int:
@@ -102,19 +169,21 @@ def _media_reminder(media_type: str) -> str:
     )
 
 
-def _visible_text(content: Any, *, allow_thinking: bool = False) -> str:
-    """Mirror the GLM-5.2 template's ``visible_text`` macro."""
+def _iter_visible_pieces(
+    content: Any, *, allow_thinking: bool = False
+) -> list[str | Mapping[str, Any]]:
+    """Split visible content into text strings and untouched media parts."""
     if isinstance(content, str):
-        return content
+        return [content]
     if not isinstance(content, list):
         raise RendererError(
             "GLM-5.2 message content must be a string or a list of content parts"
         )
 
-    rendered: list[str] = []
+    pieces: list[str | Mapping[str, Any]] = []
     for part in content:
         if isinstance(part, str):
-            rendered.append(part)
+            pieces.append(part)
             continue
         if not isinstance(part, Mapping):
             raise RendererError(
@@ -127,29 +196,122 @@ def _visible_text(content: Any, *, allow_thinking: bool = False) -> str:
                 raise RendererError(
                     "GLM-5.2 text content parts require a string 'text' field"
                 )
-            rendered.append(text)
+            pieces.append(text)
         elif part_type == "thinking":
             if allow_thinking:
                 continue
             raise RendererError("thinking content is only valid on assistant messages")
         elif isinstance(part_type, str) and part_type in _MEDIA_TYPES:
-            rendered.append(_media_reminder(_MEDIA_TYPES[part_type]))
+            pieces.append(part)
         else:
             raise RendererError(f"unsupported GLM-5.2 content part type: {part_type!r}")
-    return "".join(rendered)
+    return pieces
 
 
-def _assistant_content(message: Message) -> tuple[bool, str, str]:
-    """Return ``(has_reasoning_signal, reasoning, visible_content)``.
+def _visible_segments(
+    content: Any,
+    *,
+    allow_thinking: bool = False,
+    render_media: Any | None = None,
+) -> list[tuple[str, bool]]:
+    """Return ``(text, atomic)`` pieces. Media placeholders stay one encode."""
+    write_media = render_media or (lambda kind, _part: _media_reminder(kind))
+    segments: list[tuple[str, bool]] = []
+    for piece in _iter_visible_pieces(content, allow_thinking=allow_thinking):
+        if isinstance(piece, str):
+            segments.append((piece, False))
+        else:
+            placeholder = write_media(_MEDIA_TYPES[str(piece.get("type"))], piece)
+            segments.append((placeholder, True))
+    return segments
 
-    Tinker represents reasoning with ``ThinkingPart``.  The legacy
-    ``reasoning_content`` key is also accepted so existing GLM-5.2 SFT records
-    can be handed to the renderer without a preprocessing pass.
 
-    Literal tags in visible ``content`` stay as answer text once a field or
-    ThinkingPart is present. A serving leftover ``REASON</think>ANSWER`` with
-    neither is promoted to ``reasoning_content`` (see README). Empty
-    ``REASON`` (``</think>ANSWER``) is the no-think serving leftover.
+def _strip_visible_edges(segments: list[tuple[str, bool]]) -> list[tuple[str, bool]]:
+    """Match ``"".join(texts).strip()``, including whitespace on a media piece.
+
+    A media placeholder stays its own atomic segment. Only whitespace at the
+    ends of the concatenated string is removed, so padding around ``<|image|>``
+    does not survive the official visible-text strip.
+    """
+    if not segments:
+        return []
+    joined = "".join(text for text, _atomic in segments)
+    stripped = joined.strip()
+    if not stripped:
+        return []
+    start = len(joined) - len(joined.lstrip())
+    end = start + len(stripped)
+    kept: list[tuple[str, bool]] = []
+    position = 0
+    for text, atomic in segments:
+        segment_end = position + len(text)
+        left = max(position, start)
+        right = min(segment_end, end)
+        if right > left:
+            kept.append((text[left - position : right - position], atomic))
+        position = segment_end
+    return kept
+
+
+def _encode_visible_ids(
+    tokenizer: Tokenizer,
+    content: Any,
+    *,
+    allow_thinking: bool = False,
+    render_media: Any | None = None,
+    strip: bool = False,
+) -> list[int]:
+    """Body-BPE ordinary text. Renderer-authored media placeholders stay atomic.
+
+    Adjacent text pieces are joined before BPE so a split content list matches
+    one encode of the concatenation. A placeholder such as ``<|image|>`` is
+    encoded on its own.
+    """
+    segments = _visible_segments(
+        content, allow_thinking=allow_thinking, render_media=render_media
+    )
+    if strip:
+        segments = _strip_visible_edges(segments)
+    ids: list[int] = []
+    body: list[str] = []
+
+    def flush() -> None:
+        text = "".join(body)
+        body.clear()
+        if text:
+            ids.extend(_encode_body_ids(tokenizer, text))
+
+    for text, atomic in segments:
+        if atomic:
+            flush()
+            if text:
+                ids.extend(_encode_ids(tokenizer, text))
+        else:
+            body.append(text)
+    flush()
+    return ids
+
+
+def _visible_text(
+    content: Any,
+    *,
+    allow_thinking: bool = False,
+    render_media: Any | None = None,
+) -> str:
+    """Mirror the GLM-5.2 template's ``visible_text`` macro."""
+    return "".join(
+        text
+        for text, _atomic in _visible_segments(
+            content, allow_thinking=allow_thinking, render_media=render_media
+        )
+    )
+
+
+def _assistant_content_raw(message: Message) -> tuple[bool, str, Any]:
+    """Return ``(has_reasoning_signal, reasoning, visible)`` without flattening media.
+
+    Visible is the leftover remainder or the original ``content`` (string or
+    parts). Callers that need 5.2 reminder text run it through ``_visible_text``.
     """
     raw_message = cast(dict[str, Any], message)
     content = message["content"]
@@ -165,7 +327,7 @@ def _assistant_content(message: Message) -> tuple[bool, str, str]:
             raise RendererError(
                 "use either reasoning_content or ThinkingPart for GLM-5.2 reasoning, not both"
             )
-        return True, reasoning, _visible_text(content, allow_thinking=True)
+        return True, reasoning, content
 
     if isinstance(content, str):
         fragment = split_serving_fragment(content)
@@ -186,11 +348,29 @@ def _assistant_content(message: Message) -> tuple[bool, str, str]:
                 )
             reasoning_parts.append(reasoning)
     if reasoning_parts:
-        return True, "".join(reasoning_parts), _visible_text(content, allow_thinking=True)
+        return True, "".join(reasoning_parts), content
     fragment = split_serving_fragment(content)
     if fragment is not None:
         return True, fragment[0], fragment[1]
-    return False, "", _visible_text(content, allow_thinking=True)
+    return False, "", content
+
+
+def _assistant_content(message: Message) -> tuple[bool, str, str]:
+    """Return ``(has_reasoning_signal, reasoning, visible_content)``.
+
+    Tinker represents reasoning with ``ThinkingPart``.  The legacy
+    ``reasoning_content`` key is also accepted so existing GLM-5.2 SFT records
+    can be handed to the renderer without a preprocessing pass.
+
+    Literal tags in visible ``content`` stay as answer text once a field or
+    ThinkingPart is present. A serving leftover ``REASON</think>ANSWER`` with
+    neither is promoted to ``reasoning_content`` (see README). Empty
+    ``REASON`` (``</think>ANSWER``) is the no-think serving leftover.
+    """
+    has_reasoning, reasoning, visible = _assistant_content_raw(message)
+    if isinstance(visible, str):
+        return has_reasoning, reasoning, visible
+    return has_reasoning, reasoning, _visible_text(visible, allow_thinking=True)
 
 
 def _tool_arguments(tool_call: ToolCall) -> dict[str, Any]:
@@ -210,29 +390,30 @@ def _tool_arguments(tool_call: ToolCall) -> dict[str, Any]:
     return arguments
 
 
-def _render_tool_calls(tool_calls: list[ToolCall]) -> str:
-    rendered: list[str] = []
+def _encode_tool_calls(tokenizer: Tokenizer, tool_calls: list[ToolCall]) -> list[int]:
+    """Keep tool markup atomic and encode names, keys, and values as data.
+
+    Non-string values are ``json.dumps``'d first and still take the body path,
+    so a ``<tool_call>`` inside a nested value is not a second tool-call token.
+    """
+    ids: list[int] = []
     for tool_call in tool_calls:
         arguments = _tool_arguments(tool_call)
-        parts = ["<tool_call>", tool_call.function.name]
+        ids.extend(_encode_ids(tokenizer, "<tool_call>"))
+        ids.extend(_encode_body_ids(tokenizer, tool_call.function.name))
         for key, value in arguments.items():
             rendered_value = (
                 value
                 if isinstance(value, str)
                 else json.dumps(value, ensure_ascii=False)
             )
-            parts.extend(
-                (
-                    "<arg_key>",
-                    str(key),
-                    "</arg_key><arg_value>",
-                    rendered_value,
-                    "</arg_value>",
-                )
-            )
-        parts.append("</tool_call>")
-        rendered.append("".join(parts))
-    return "".join(rendered)
+            ids.extend(_encode_ids(tokenizer, "<arg_key>"))
+            ids.extend(_encode_body_ids(tokenizer, str(key)))
+            ids.extend(_encode_ids(tokenizer, "</arg_key><arg_value>"))
+            ids.extend(_encode_body_ids(tokenizer, rendered_value))
+            ids.extend(_encode_ids(tokenizer, "</arg_value>"))
+        ids.extend(_encode_ids(tokenizer, "</tool_call>"))
+    return ids
 
 
 def _normalize_tool_spec(raw_tool: ToolSpec | Mapping[str, Any]) -> dict[str, Any]:
@@ -265,7 +446,7 @@ def _tool_specs_from_messages(
     return None
 
 
-def _render_tool_references(
+def _tool_reference_body(
     content: list[Any], tool_specs: tuple[dict[str, Any], ...] | None
 ) -> str:
     if tool_specs is None:
@@ -284,21 +465,36 @@ def _render_tool_references(
                 tool_lines.append(
                     json.dumps(_serializable_tool_spec(tool), ensure_ascii=False)
                 )
-    rendered_tools = "".join(f"{line}\n" for line in tool_lines)
-    return f"<tool_response><tools>\n{rendered_tools}</tools></tool_response>"
+    return "".join(f"{line}\n" for line in tool_lines)
 
 
-def _render_tool_response(
-    content: Any, tool_specs: tuple[dict[str, Any], ...] | None
-) -> str:
+def _encode_tool_response(
+    tokenizer: Tokenizer,
+    content: Any,
+    tool_specs: tuple[dict[str, Any], ...] | None,
+    render_media: Any | None = None,
+) -> list[int]:
+    """Keep ``<tool_response>`` wrappers atomic and encode result text as data.
+
+    Media placeholders inside a non-string result stay one token each. Result
+    JSON is not the format template, so schema text stays on the body path.
+    """
     if isinstance(content, str):
-        return f"<tool_response>{content}</tool_response>"
+        return (
+            _encode_ids(tokenizer, "<tool_response>")
+            + _encode_body_ids(tokenizer, content)
+            + _encode_ids(tokenizer, "</tool_response>")
+        )
     if isinstance(content, list) and content:
         first = content[0]
         if isinstance(first, Mapping) and first.get("type") == "tool_reference":
-            return _render_tool_references(content, tool_specs)
+            return (
+                _encode_ids(tokenizer, "<tool_response><tools>\n")
+                + _encode_body_ids(tokenizer, _tool_reference_body(content, tool_specs))
+                + _encode_ids(tokenizer, "</tools></tool_response>")
+            )
         if isinstance(first, Mapping) and "output" in first:
-            outputs: list[str] = []
+            ids: list[int] = []
             for item in content:
                 if not isinstance(item, Mapping) or not isinstance(
                     item.get("output"), str
@@ -306,9 +502,15 @@ def _render_tool_response(
                     raise RendererError(
                         "structured GLM-5.2 tool results require string 'output' fields"
                     )
-                outputs.append(f"<tool_response>{item['output']}</tool_response>")
-            return "".join(outputs)
-    return f"<tool_response>{_visible_text(content)}</tool_response>"
+                ids.extend(_encode_ids(tokenizer, "<tool_response>"))
+                ids.extend(_encode_body_ids(tokenizer, item["output"]))
+                ids.extend(_encode_ids(tokenizer, "</tool_response>"))
+            return ids
+    return (
+        _encode_ids(tokenizer, "<tool_response>")
+        + _encode_visible_ids(tokenizer, content, render_media=render_media)
+        + _encode_ids(tokenizer, "</tool_response>")
+    )
 
 
 def _parse_tool_call(raw_block: str, body: str) -> ToolCall | UnparsedToolCall:
@@ -380,9 +582,10 @@ def _parse_tool_calls(
 class GLM52Renderer(Renderer):
     """Renderer for GLM-5.2 with thinking enabled.
 
-    ``reasoning_effort='max'`` matches the tokenizer template default.  Use
-    ``'high'`` for the lower-effort supported mode.  Historical reasoning is
-    preserved, which gives this renderer Tinker's sequence extension property.
+    ``reasoning_effort`` only changes the system line ``Reasoning Effort:
+    {Max|High}``. Default ``max``. GLM-5.3 adds ``Low`` on
+    ``GLM53Renderer``. Historical reasoning is preserved, which gives this
+    renderer Tinker's sequence extension property.
 
     ``supervise_reasoning=False`` renders an identical token sequence but moves
     the assistant ``<think>{reasoning}</think>`` block into the header. Modes
@@ -393,34 +596,65 @@ class GLM52Renderer(Renderer):
     """
 
     supports_streaming = False
+    # Official GLM-5.2 template: explicit high, otherwise max. GLM-5.3 overrides this.
+    reasoning_efforts: tuple[str, ...] = GLM52_REASONING_EFFORTS
 
     def __init__(
         self,
         tokenizer: Tokenizer,
         *,
-        reasoning_effort: Literal["high", "max"] = "max",
+        reasoning_effort: str = "max",
         enable_thinking: bool = True,
         supervise_reasoning: bool = True,
     ):
         super().__init__(tokenizer)
-        if reasoning_effort not in ("high", "max"):
-            raise ValueError("GLM-5.2 reasoning_effort must be 'high' or 'max'")
+        if reasoning_effort not in self.reasoning_efforts:
+            allowed = ", ".join(self.reasoning_efforts)
+            raise ValueError(
+                f"{type(self).__name__} reasoning_effort must be one of {allowed}"
+            )
         self.reasoning_effort = reasoning_effort
         self.enable_thinking = bool(enable_thinking)
         self.disables_thinking = not self.enable_thinking
         self.supervise_reasoning = bool(supervise_reasoning)
 
-        prefix = _GMASK_SOP
-        if self.enable_thinking:
-            prefix += f"{_SYSTEM}Reasoning Effort: {reasoning_effort.capitalize()}"
-        self._prefix_tokens = tokenizer.encode(prefix, add_special_tokens=False)
+        self._prefix_tokens_by_effort = {
+            effort: self._encode_effort_prefix(effort) for effort in self.reasoning_efforts
+        }
+        self._prefix_tokens = list(self._prefix_tokens_by_effort[self.reasoning_effort])
         self._stop_token_ids = {
             token: _single_token_id(tokenizer, token) for token in _STOP_TOKENS
         }
 
+    def _encode_effort_prefix(self, effort: str) -> list[int]:
+        prefix = _GMASK_SOP
+        if self.enable_thinking:
+            prefix += f"{_SYSTEM}Reasoning Effort: {effort.capitalize()}"
+        return self.tokenizer.encode(prefix, add_special_tokens=False)
+
+    @contextmanager
+    def reasoning_effort_scope(self, effort: str) -> Iterator[None]:
+        """Select this effort's prefix for one render, then restore the default.
+
+        The allowed prefixes are encoded once. This does not replace the renderer.
+        """
+        if effort not in self._prefix_tokens_by_effort:
+            allowed = ", ".join(self.reasoning_efforts)
+            raise ValueError(
+                f"{type(self).__name__} reasoning_effort must be one of {allowed}"
+            )
+        token = _RENDER_EFFORT.set(effort)
+        try:
+            yield
+        finally:
+            _RENDER_EFFORT.reset(token)
+
     @property
     def _bos_tokens(self) -> list[int]:
-        return list(self._prefix_tokens)
+        effort = _RENDER_EFFORT.get()
+        if effort not in self._prefix_tokens_by_effort:
+            effort = self.reasoning_effort
+        return list(self._prefix_tokens_by_effort[effort])
 
     @property
     def has_extension_property(self) -> bool:
@@ -433,6 +667,17 @@ class GLM52Renderer(Renderer):
         if self.enable_thinking:
             return f"{_ASSISTANT}{_THINK_OPEN}"
         return f"{_ASSISTANT}{_THINK_OPEN}{_THINK_CLOSE}"
+
+    def _media_placeholder(self, kind: str, part: Mapping[str, Any]) -> str:
+        del part
+        return _media_reminder(kind)
+
+    def _flatten_visible(self, content: Any, *, allow_thinking: bool = False) -> str:
+        return _visible_text(
+            content,
+            allow_thinking=allow_thinking,
+            render_media=self._media_placeholder,
+        )
 
     def _boundary_after_assistant(self, ctx: RenderContext) -> str:
         next_message = getattr(ctx, "next_message", None)
@@ -457,52 +702,97 @@ class GLM52Renderer(Renderer):
             )
 
         if role == "assistant":
-            has_reasoning, reasoning, content = _assistant_content(message)
+            has_reasoning, reasoning, visible = _assistant_content_raw(message)
             if not self.enable_thinking and has_reasoning:
                 raise RendererError(
                     "GLM-5.2 thinking is disabled, but the assistant message contains "
                     "ThinkingPart/reasoning_content"
                 )
-            header_text = self._assistant_header()
-            output_text = ""
+            # Structural markers stay one token each. Text the row actually
+            # contains — reasoning, the visible answer, tool names, and
+            # argument values — is ordinary BPE, including any added-token
+            # spelling such as <think> or <|user|>.
+            header_ids = _encode_ids(self.tokenizer, self._assistant_header())
+            output_ids: list[int] = []
             if self.enable_thinking:
+                reasoning_ids = _encode_body_ids(self.tokenizer, reasoning)
+                close_ids = _encode_ids(self.tokenizer, _THINK_CLOSE)
                 if self.supervise_reasoning:
-                    output_text += reasoning + _THINK_CLOSE
+                    output_ids.extend(reasoning_ids)
+                    output_ids.extend(close_ids)
                 else:
                     # Keep the chain-of-thought in the sequence; put it in the
                     # header so modes that skip headers do not train it.
-                    header_text += reasoning + _THINK_CLOSE
+                    header_ids.extend(reasoning_ids)
+                    header_ids.extend(close_ids)
             # Official template strips visible_text. Same strip for field,
             # ThinkingPart, leftover, and plain answers — do it here, not
             # in _assistant_content, so tests that decode the wire see the
-            # stripped form for every writing.
-            if content.strip():
-                output_text += content.strip()
+            # stripped form for every writing. Media placeholders stay atomic.
+            output_ids.extend(
+                _encode_visible_ids(
+                    self.tokenizer,
+                    visible,
+                    allow_thinking=True,
+                    render_media=self._media_placeholder,
+                    strip=True,
+                )
+            )
             tool_calls = list(message.get("tool_calls", []))
             if tool_calls:
-                output_text += _render_tool_calls(tool_calls)
-            output_text += self._boundary_after_assistant(ctx)
-            header = _encoded_chunk(self.tokenizer, header_text)
-            output = (
-                [_encoded_chunk(self.tokenizer, output_text)] if output_text else []
+                output_ids.extend(_encode_tool_calls(self.tokenizer, tool_calls))
+            output_ids.extend(
+                _encode_ids(self.tokenizer, self._boundary_after_assistant(ctx))
             )
+            header = _chunk_from_ids(header_ids)
+            output = [chunk] if (chunk := _chunk_from_ids(output_ids)) is not None else []
             return RenderedMessage(header=header, output=output)
 
         prev_role = ctx.prev_message["role"] if ctx.prev_message is not None else None
+        # Dataset text is body BPE. The tool declaration built by
+        # create_conversation_prefix_with_tools is the exception: one
+        # _encode_ids call, so the official format tags (<tool_call>,
+        # <arg_key>, <arg_value>) stay one token each. Do not switch that
+        # message to _encode_body_ids. Schema descriptions are ordinary prose
+        # and match either encoder.
         if role == "user":
             header_text = "" if prev_role == "assistant" else _USER
-            output_text = _visible_text(message["content"])
+            output_ids = _encode_visible_ids(
+                self.tokenizer,
+                message["content"],
+                render_media=self._media_placeholder,
+            )
         elif role == "system":
             header_text = _SYSTEM
-            output_text = _visible_text(message["content"])
+            # The tool declaration is one _encode_ids call so format tags stay
+            # atomic. Ordinary system text, including media placeholders, uses
+            # the visible encoder.
+            if cast(dict[str, Any], message).get(_TOOL_CONTEXT_KEY) is not None:
+                # One encode of the whole declaration keeps format tags atomic.
+                # render_media still runs, so a media part is not the 5.2 reminder
+                # when a subclass replaces the placeholder.
+                output_ids = _encode_ids(
+                    self.tokenizer,
+                    _visible_text(
+                        message["content"], render_media=self._media_placeholder
+                    ),
+                )
+            else:
+                output_ids = _encode_visible_ids(
+                    self.tokenizer,
+                    message["content"],
+                    render_media=self._media_placeholder,
+                )
         else:
             header_text = "" if prev_role in ("assistant", "tool") else _OBSERVATION
-            output_text = _render_tool_response(
-                message["content"], _ACTIVE_TOOL_SPECS.get()
+            output_ids = _encode_tool_response(
+                self.tokenizer,
+                message["content"],
+                _ACTIVE_TOOL_SPECS.get(),
+                render_media=self._media_placeholder,
             )
-
         header = _encoded_chunk(self.tokenizer, header_text) if header_text else None
-        output = [_encoded_chunk(self.tokenizer, output_text)] if output_text else []
+        output = [chunk] if (chunk := _chunk_from_ids(output_ids)) is not None else []
         return RenderedMessage(header=header, output=output)
 
     def _get_generation_suffix(self, role: str, ctx: RenderContext) -> list[int]:
@@ -633,12 +923,16 @@ class GLM52Renderer(Renderer):
     def to_openai_message(self, message: Message) -> dict[str, Any]:
         result: dict[str, Any] = {"role": message["role"]}
         if message["role"] == "assistant":
-            has_reasoning, reasoning, visible = _assistant_content(message)
-            result["content"] = visible
+            has_reasoning, reasoning, visible = _assistant_content_raw(message)
+            result["content"] = (
+                visible
+                if isinstance(visible, str)
+                else self._flatten_visible(visible, allow_thinking=True)
+            )
             if has_reasoning:
                 result["reasoning_content"] = reasoning
         else:
-            result["content"] = _visible_text(message["content"])
+            result["content"] = self._flatten_visible(message["content"])
 
         if message.get("tool_calls"):
             result["tool_calls"] = [
@@ -694,8 +988,17 @@ class GLM52Renderer(Renderer):
         return messages
 
 
+class GLM53Renderer(GLM52Renderer):
+    """GLM-5.3 text renderer. Official template accepts low, high, and max."""
+
+    reasoning_efforts = GLM53_REASONING_EFFORTS
+
+
 class GLM52DisableThinkingRenderer(GLM52Renderer):
-    """GLM-5.2 renderer whose prompt pre-fills ``<think></think>``."""
+    """GLM-5.2 renderer whose prompt pre-fills ``<think></think>``.
+
+    Thinking is off, so the template writes no reasoning-effort line.
+    """
 
     disables_thinking = True
 
@@ -704,10 +1007,14 @@ class GLM52DisableThinkingRenderer(GLM52Renderer):
 
 
 def register_glm52_renderers() -> None:
-    """Register MinT's namespaced GLM-5.2 renderer factories."""
+    """Register MinT's namespaced GLM renderer factories."""
     register_renderer(
         GLM52_RENDERER,
         lambda tokenizer, image_processor=None: GLM52Renderer(tokenizer),
+    )
+    register_renderer(
+        GLM53_RENDERER,
+        lambda tokenizer, image_processor=None: GLM53Renderer(tokenizer),
     )
     register_renderer(
         GLM52_HIGH_REASONING_RENDERER,
@@ -728,7 +1035,10 @@ __all__ = [
     "GLM52_DISABLE_THINKING_RENDERER",
     "GLM52_HIGH_REASONING_RENDERER",
     "GLM52_RENDERER",
+    "GLM53_RENDERER",
     "GLM52DisableThinkingRenderer",
     "GLM52Renderer",
+    "GLM53Renderer",
+    "REASONING_EFFORTS",
     "register_glm52_renderers",
 ]

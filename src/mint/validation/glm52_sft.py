@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import json
 import os
@@ -13,12 +14,23 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Literal, cast
 
+from mint.reasoning_effort import reasoning_efforts_for_model
 from mint.reasoning_source import split_serving_fragment
 
 FATAL = "fatal"
 WARNING = "warning"
 
-_ROOT_KEYS = {"messages", "tools", "chat_template_kwargs", "meta"}
+_ROOT_KEYS = {
+    "messages",
+    "tools",
+    "chat_template_kwargs",
+    "reasoning_effort",
+    "reasoning",
+    "meta",
+}
+# Spellings resolve_reasoning_effort can return. Which of them a model accepts
+# is reasoning_efforts_for_model; L1 checks that set, not this union.
+_REASONING_EFFORTS = frozenset({"low", "high", "max"})
 _MESSAGE_KEYS = {
     "system": {"role", "content"},
     "user": {"role", "content"},
@@ -140,10 +152,18 @@ class ValidationReport:
 
 
 class _RecordValidator:
-    def __init__(self, report: ValidationReport, line: int, record: dict[str, Any]):
+    def __init__(
+        self,
+        report: ValidationReport,
+        line: int,
+        record: dict[str, Any],
+        *,
+        reasoning_efforts: tuple[str, ...] = ("high", "max"),
+    ):
         self.report = report
         self.line = line
         self.record = record
+        self.reasoning_efforts = reasoning_efforts
         meta = record.get("meta")
         raw_id = None
         if isinstance(meta, Mapping):
@@ -830,9 +850,7 @@ class _RecordValidator:
 
     def kwargs(self) -> None:
         kwargs = self.record.get("chat_template_kwargs")
-        if kwargs is None:
-            return
-        if not isinstance(kwargs, Mapping):
+        if kwargs is not None and not isinstance(kwargs, Mapping):
             self.fatal(
                 "L1",
                 "template-kwargs-shape",
@@ -840,33 +858,63 @@ class _RecordValidator:
                 "chat_template_kwargs 必须是对象",
                 "提供 enable_thinking/reasoning_effort，或删除该字段。",
             )
-            return
-        self.exact_keys(
-            kwargs,
-            allowed={"enable_thinking", "reasoning_effort"},
-            required=set(),
-            path="chat_template_kwargs",
-        )
-        if "enable_thinking" in kwargs and not isinstance(
-            kwargs["enable_thinking"], bool
+        elif isinstance(kwargs, Mapping):
+            self.exact_keys(
+                kwargs,
+                allowed={"enable_thinking", "reasoning_effort"},
+                required=set(),
+                path="chat_template_kwargs",
+            )
+            if "enable_thinking" in kwargs and not isinstance(
+                kwargs["enable_thinking"], bool
+            ):
+                self.fatal(
+                    "L1",
+                    "enable-thinking",
+                    "chat_template_kwargs.enable_thinking",
+                    "enable_thinking 必须是布尔值",
+                    "使用 true 或 false。",
+                )
+        reasoning = self.record.get("reasoning")
+        if reasoning is not None and not isinstance(reasoning, Mapping):
+            self.fatal(
+                "L1",
+                "reasoning-shape",
+                "reasoning",
+                "reasoning 必须是对象",
+                '使用 {"effort": "high"}，或删除该字段。',
+            )
+        elif isinstance(reasoning, Mapping):
+            self.exact_keys(
+                reasoning,
+                allowed={"effort"},
+                required={"effort"},
+                path="reasoning",
+            )
+        declared = _effort_declarations(self.record)
+        allowed = "、".join(self.reasoning_efforts)
+        for path, value in declared:
+            if not isinstance(value, str) or value not in self.reasoning_efforts:
+                self.fatal(
+                    "L1",
+                    "reasoning-effort",
+                    path,
+                    f"不支持 reasoning_effort={value!r}",
+                    f"使用 {allowed}。",
+                )
+        if len(declared) >= 2 and any(
+            value != declared[0][1] for _path, value in declared[1:]
         ):
+            listed = ", ".join(f"{path}={value!r}" for path, value in declared)
             self.fatal(
                 "L1",
-                "enable-thinking",
-                "chat_template_kwargs.enable_thinking",
-                "enable_thinking 必须是布尔值",
-                "使用 true 或 false。",
+                "reasoning-effort-conflict",
+                "$",
+                f"reasoning effort 写法不一致: {listed}",
+                "顶层 reasoning_effort、reasoning.effort 与 "
+                "chat_template_kwargs.reasoning_effort 必须是同一档。",
             )
-        effort = kwargs.get("reasoning_effort")
-        if effort is not None and effort not in {"high", "max"}:
-            self.fatal(
-                "L1",
-                "reasoning-effort",
-                "chat_template_kwargs.reasoning_effort",
-                f"不支持 reasoning_effort={effort!r}",
-                "使用 high 或 max。",
-            )
-        if kwargs.get("enable_thinking") is False:
+        if isinstance(kwargs, Mapping) and kwargs.get("enable_thinking") is False:
             messages = self.record.get("messages", [])
             if isinstance(messages, list):
                 for index, message in enumerate(messages):
@@ -1086,30 +1134,79 @@ def _tinker_messages(raw_messages: list[dict[str, Any]]) -> list[Any]:
     return converted
 
 
+def _effort_declarations(record: Mapping[str, Any]) -> list[tuple[str, Any]]:
+    """Every reasoning-effort spelling present on one record, in source order."""
+    found: list[tuple[str, Any]] = []
+    if "reasoning_effort" in record:
+        found.append(("reasoning_effort", record.get("reasoning_effort")))
+    reasoning = record.get("reasoning")
+    if isinstance(reasoning, Mapping) and "effort" in reasoning:
+        found.append(("reasoning.effort", reasoning.get("effort")))
+    kwargs = record.get("chat_template_kwargs")
+    if isinstance(kwargs, Mapping) and "reasoning_effort" in kwargs:
+        found.append(
+            ("chat_template_kwargs.reasoning_effort", kwargs.get("reasoning_effort"))
+        )
+    return found
+
+
+def resolve_reasoning_effort(record: Mapping[str, Any]) -> str:
+    """Return the one effort these spellings agree on, or ``max`` when absent.
+
+    ``low`` / ``high`` / ``max`` may be written as top-level ``reasoning_effort``,
+    ``reasoning.effort``, or ``chat_template_kwargs.reasoning_effort``. A record
+    that names more than one value is invalid; this raises instead of picking.
+    """
+    values = [value for _path, value in _effort_declarations(record)]
+    if len(values) >= 2 and any(value != values[0] for value in values[1:]):
+        raise ValueError(f"conflicting reasoning_effort declarations: {values!r}")
+    valid = [
+        value
+        for value in values
+        if isinstance(value, str) and value in _REASONING_EFFORTS
+    ]
+    if not valid:
+        return "max"
+    return valid[0]
+
+
 def _render_record(
-    record: dict[str, Any], tokenizer: Any, renderer_cache: dict[tuple[bool, str], Any]
+    record: dict[str, Any],
+    tokenizer: Any,
+    renderer_cache: dict[tuple[bool, str], Any],
+    *,
+    model_name: str = "zai-org/GLM-5.2",
 ) -> tuple[list[int], list[float]]:
     from tinker_cookbook.renderers import TrainOnWhat
 
-    from mint.renderers import GLM52DisableThinkingRenderer, GLM52Renderer
+    from mint.renderers import GLM52DisableThinkingRenderer, GLM52Renderer, GLM53Renderer
 
     kwargs = record.get("chat_template_kwargs") or {}
+    if not isinstance(kwargs, Mapping):
+        kwargs = {}
     enable_thinking = kwargs.get("enable_thinking", True)
-    effort = kwargs.get("reasoning_effort", "max")
-    cache_key = (enable_thinking, effort)
+    effort = resolve_reasoning_effort(record)
+    family = "glm53" if "GLM-5.3" in model_name.split(":", 1)[0] else "glm52"
+    cache_key = (bool(enable_thinking), family)
     renderer = renderer_cache.get(cache_key)
     if renderer is None:
-        renderer = (
-            GLM52Renderer(tokenizer, reasoning_effort=effort)
-            if enable_thinking
-            else GLM52DisableThinkingRenderer(tokenizer)
-        )
+        if enable_thinking:
+            text_cls = GLM53Renderer if family == "glm53" else GLM52Renderer
+            renderer = text_cls(tokenizer)
+        else:
+            renderer = GLM52DisableThinkingRenderer(tokenizer)
         renderer_cache[cache_key] = renderer
-    prefix = renderer.create_conversation_prefix_with_tools(record.get("tools") or [])
-    messages = [*prefix, *_tinker_messages(record["messages"])]
-    model_input, weights = renderer.build_supervised_example(
-        messages, TrainOnWhat.ALL_ASSISTANT_MESSAGES
+    scope = (
+        renderer.reasoning_effort_scope(effort)
+        if enable_thinking
+        else contextlib.nullcontext()
     )
+    with scope:
+        prefix = renderer.create_conversation_prefix_with_tools(record.get("tools") or [])
+        messages = [*prefix, *_tinker_messages(record["messages"])]
+        model_input, weights = renderer.build_supervised_example(
+            messages, TrainOnWhat.ALL_ASSISTANT_MESSAGES
+        )
     return model_input.to_ints(), [float(value) for value in weights.tolist()]
 
 
@@ -1142,8 +1239,11 @@ def validate_jsonl(
     records = _load_records(path, report)
     structurally_valid: list[tuple[int, dict[str, Any], _RecordValidator]] = []
     seen: dict[str, int] = {}
+    reasoning_efforts = reasoning_efforts_for_model(model_name)
     for line, record in records:
-        validator = _RecordValidator(report, line, record)
+        validator = _RecordValidator(
+            report, line, record, reasoning_efforts=reasoning_efforts
+        )
         if validator.run():
             structurally_valid.append((line, record, validator))
         digest = _canonical_digest(record)
@@ -1166,7 +1266,9 @@ def validate_jsonl(
     renderer_cache: dict[tuple[bool, str], Any] = {}
     for line, record, validator in structurally_valid:
         try:
-            tokens, weights = _render_record(record, tokenizer, renderer_cache)
+            tokens, weights = _render_record(
+                record, tokenizer, renderer_cache, model_name=model_name
+            )
         # Renderer/tokenizer implementations expose several exception families;
         # this per-record boundary must convert all data-dependent failures into
         # findings while still allowing BaseException interrupts to propagate.
@@ -1374,6 +1476,7 @@ __all__ = [
     "ValidationReport",
     "main",
     "parse_args",
+    "resolve_reasoning_effort",
     "validate_jsonl",
 ]
 
